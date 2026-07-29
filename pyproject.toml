@@ -1,0 +1,15 @@
+[project]
+name = "pxmodel-general-localization"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+  "dotenv>=0.9.9",
+  "hf>=1.25.1",
+  "huggingface-hub>=1.25.1",
+  "requests>=2.34.2",
+  "torch",
+  "torchvision",
+  "transformers",
+]
