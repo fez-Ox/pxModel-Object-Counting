@@ -3,16 +3,58 @@
 
 Usage:
   python infer.py image.jpg "red cars"
-  python infer.py image1.jpg image2.jpg "people" --out results/
+  python infer.py https://example.com/image.jpg "red cars"
+  python infer.py image1.jpg https://example.com/image2.png "people" --out results/
   python infer.py --checkpoint checkpoints/count_anything.pt image.jpg "dogs"
 """
 
 import argparse
+import mimetypes
+import shutil
 import sys
+import tempfile
+import urllib.error
+import urllib.request
 from pathlib import Path
+from urllib.parse import unquote, urlparse
 
 REPO_ROOT = Path(__file__).resolve().parent
 DEFAULT_CKPT = REPO_ROOT / "checkpoints" / "count_anything.pt"
+
+
+def _is_url(value):
+    parsed = urlparse(value)
+    return parsed.scheme in {"http", "https"} and bool(parsed.netloc)
+
+
+def _download_image(url, work_dir, timeout):
+    parsed = urlparse(url)
+    suffix = Path(unquote(parsed.path)).suffix
+    if not suffix:
+        guessed = mimetypes.guess_extension(mimetypes.guess_type(url)[0] or "")
+        suffix = guessed or ".jpg"
+
+    with tempfile.NamedTemporaryFile(
+        prefix="count_anything_url_", suffix=suffix, dir=work_dir, delete=False
+    ) as tmp:
+        tmp_name = tmp.name
+
+    headers = {"User-Agent": "count-anything-infer/1.0"}
+    request = urllib.request.Request(url, headers=headers)
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response, open(tmp_name, "wb") as out:
+            shutil.copyfileobj(response, out)
+    except (urllib.error.URLError, TimeoutError, OSError):
+        Path(tmp_name).unlink(missing_ok=True)
+        raise
+    return Path(tmp_name)
+
+
+def _display_name(value):
+    if _is_url(value):
+        parsed = urlparse(value)
+        return Path(unquote(parsed.path)).name or parsed.netloc
+    return Path(value).name
 
 
 def _resolve_checkpoint(path):
@@ -22,7 +64,8 @@ def _resolve_checkpoint(path):
     p = p.resolve()
     if not p.exists():
         print(f"Error: checkpoint not found at {p}", file=sys.stderr)
-        print("Download from: https://huggingface.co/MengqiLei/count-anything", file=sys.stderr)
+        print("Download it with: python download_checkpoint.py", file=sys.stderr)
+        print("Source: https://huggingface.co/MengqiLei/count-anything/resolve/main/count_anything.pt", file=sys.stderr)
         sys.exit(1)
     return str(p)
 
@@ -31,7 +74,7 @@ def main():
     parser = argparse.ArgumentParser(
         description="Count objects in an image using a text query (CountAnything)."
     )
-    parser.add_argument("images", nargs="+", help="Path(s) to image(s)")
+    parser.add_argument("images", nargs="+", help="Path(s) or http(s) URL(s) to image(s)")
     parser.add_argument("query", help="Text description of objects to count (e.g. 'red cars')")
     parser.add_argument(
         "--checkpoint", "-c",
@@ -48,6 +91,12 @@ def main():
         action="store_true",
         help="Display the result in a window (if DISPLAY is available)",
     )
+    parser.add_argument(
+        "--download-timeout",
+        type=int,
+        default=30,
+        help="Timeout in seconds for downloading image URLs (default: 30)",
+    )
     args = parser.parse_args()
 
     ckpt = _resolve_checkpoint(args.checkpoint)
@@ -56,27 +105,36 @@ def main():
 
     model = CountAnything(checkpoint=ckpt, output_dir=args.out or str(REPO_ROOT / "exp" / "count_anything_inference"))
 
-    for img_path in args.images:
-        p = Path(img_path)
-        if not p.exists():
-            print(f"Skip: {img_path} — file not found", file=sys.stderr)
-            continue
+    with tempfile.TemporaryDirectory(prefix="count_anything_infer_") as tmp_dir:
+        for img_path in args.images:
+            if _is_url(img_path):
+                print(f"Downloading: {img_path}")
+                try:
+                    p = _download_image(img_path, tmp_dir, args.download_timeout)
+                except Exception as e:
+                    print(f"Skip: {img_path} — download failed: {e}", file=sys.stderr)
+                    continue
+            else:
+                p = Path(img_path)
+                if not p.exists():
+                    print(f"Skip: {img_path} — file not found", file=sys.stderr)
+                    continue
 
-        print(f"Processing: {p.name}")
-        try:
-            results = model(str(p.resolve()), args.query)
-        except Exception as e:
-            print(f"  Error: {e}", file=sys.stderr)
-            continue
+            print(f"Processing: {_display_name(img_path)}")
+            try:
+                results = model(str(p.resolve()), args.query)
+            except Exception as e:
+                print(f"  Error: {e}", file=sys.stderr)
+                continue
 
-        for r in results:
-            saved = r.save()
-            print(f"  Count: {r.count}")
-            print(f"  Points: {len(r.pred_points)}")
-            print(f"  Saved: {saved}")
-            if args.show:
-                r.show()
-        print()
+            for r in results:
+                saved = r.save()
+                print(f"  Count: {r.count}")
+                print(f"  Points: {len(r.pred_points)}")
+                print(f"  Saved: {saved}")
+                if args.show:
+                    r.show()
+            print()
 
 
 if __name__ == "__main__":

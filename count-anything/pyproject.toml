@@ -1,0 +1,43 @@
+[project]
+name = "count-anything-inference"
+version = "0.1.0"
+description = "Inference-only CountAnything setup"
+requires-python = ">=3.10"
+dependencies = [
+  "torch>=2.0.0",
+  "torchvision>=0.15.0",
+  "timm>=1.0.17",
+  "einops>=0.7.0",
+  "numpy>=1.26,<2",
+  "Pillow>=9.0.0",
+  "matplotlib>=3.7.0",
+  "pandas>=2.0.0",
+  "PyYAML>=6.0",
+  "tqdm>=4.60.0",
+  "hydra-core",
+  "omegaconf",
+  "submitit",
+  "tensorboard",
+  "scipy",
+  "torchmetrics",
+  "triton>=2.0.0; platform_system == 'Linux'",
+  "fvcore",
+  "fairscale",
+  "scikit-image",
+  "scikit-learn",
+  "opencv-python",
+  "pycocotools",
+  "nibabel",
+  "decord",
+  "psutil",
+  "typing_extensions",
+  "setuptools",
+  "ftfy==6.1.1",
+  "regex",
+  "iopath>=0.1.10",
+  "huggingface_hub",
+  "zstandard",
+]
+
+[tool.uv]
+package = false
