@@ -213,6 +213,10 @@ class CountAnything:
     def _run(self, config_path: Path) -> None:
         env = os.environ.copy()
         env["PYTHONPATH"] = str(self.repo_root) + os.pathsep + env.get("PYTHONPATH", "")
+        # Kaggle/Jupyter often sets MPLBACKEND=module://matplotlib_inline.backend_inline.
+        # That backend is not available in this isolated uv environment, and torchmetrics
+        # imports matplotlib during trainer setup. Force a headless-safe backend for inference.
+        env["MPLBACKEND"] = "Agg"
         subprocess.run(
             [
                 self.python_executable,
