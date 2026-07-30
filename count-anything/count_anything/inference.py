@@ -3,13 +3,13 @@ from __future__ import annotations
 import json
 import os
 import re
-import subprocess
 import sys
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, List
 
+import torch
 import yaml
 
 
@@ -102,6 +102,7 @@ class CountAnything:
         output_dir: str | os.PathLike = "exp/count_anything_inference",
         num_gpus: int = 1,
         python_executable: str = sys.executable,
+        device: str | None = None,
     ) -> None:
         self.repo_root = Path(__file__).resolve().parents[1]
         self.checkpoint = self._resolve_path(checkpoint)
@@ -109,6 +110,8 @@ class CountAnything:
         self.output_dir = self._resolve_path(output_dir)
         self.num_gpus = int(num_gpus)
         self.python_executable = python_executable
+        self.device = device or ("cuda" if torch.cuda.is_available() else "cpu")
+        self._runtime = None
 
     def __call__(self, image_path: str | os.PathLike, text_query: str) -> List[CountAnythingResult]:
         image_path = Path(image_path).expanduser().resolve()
@@ -120,16 +123,9 @@ class CountAnything:
 
         run_dir = self._make_run_dir(image_path, text_query)
         annotation_path = run_dir / "temporary_inference_annotation.json"
-        config_path = run_dir / "temporary_count_anything_inference.yaml"
-        detail_path = run_dir / "temporary_prediction_records.json"
 
         self._write_annotation(annotation_path, image_path, text_query)
-        self._write_config(config_path, annotation_path, detail_path, run_dir)
-        self._run(config_path)
-
-        record = self._load_record(detail_path)
-        detail_path.unlink(missing_ok=True)
-        (run_dir / "log.txt").unlink(missing_ok=True)
+        record = self._run_direct(annotation_path)
         return [
             CountAnythingResult(
                 image_path=str(image_path),
@@ -172,75 +168,85 @@ class CountAnything:
         }
         path.write_text(json.dumps(annotation, ensure_ascii=False, indent=2), encoding="utf-8")
 
-    def _write_config(
-        self,
-        path: Path,
-        annotation_path: Path,
-        detail_path: Path,
-        run_dir: Path,
-    ) -> None:
+    def _load_runtime(self):
+        if self._runtime is not None:
+            return self._runtime
+
+        from hydra.utils import instantiate
+        from omegaconf import OmegaConf
+
         with self.config.open("r", encoding="utf-8") as f:
             config = yaml.safe_load(f)
 
-        checkpoint = str(self.checkpoint)
-        annotation_file = str(annotation_path)
-        config["paths"]["train_annotation_file"] = annotation_file
-        config["paths"]["val_annotation_file"] = annotation_file
-        config["paths"]["experiment_log_dir"] = str(run_dir)
-        config["paths"]["stage1_checkpoint_path"] = checkpoint
+        model_conf = config["trainer"]["model"]
+        model_conf["device"] = self.device
+        model_conf["eval_mode"] = True
+        model_conf["checkpoint_path"] = str(self.checkpoint)
+        model_conf["load_from_HF"] = False
 
-        trainer = config["trainer"]
-        for split in ("train", "val"):
-            trainer["data"][split]["dataset"]["ann_file"] = annotation_file
-            trainer["data"][split]["batch_size"] = 1
-            trainer["data"][split]["num_workers"] = 0
-        trainer["model"]["load_from_HF"] = False
-        trainer["model"]["checkpoint_path"] = None
-        trainer["checkpoint"]["model_weight_initializer"]["checkpoint_path"] = checkpoint
-        trainer["checkpoint"]["save_dir"] = str(run_dir / "checkpoints")
-        trainer["logging"]["log_dir"] = str(run_dir)
-        trainer["logging"]["tensorboard_writer"]["log_dir"] = str(run_dir / "tensorboard")
-        trainer["meters"]["val"]["all"]["counting"]["detail_records_path"] = str(detail_path)
-        trainer["meters"]["val"]["all"]["counting"]["include_points"] = True
-        trainer["meters"]["val"]["all"]["counting"]["include_scores"] = True
-        trainer["meters"]["val"]["all"]["counting"]["expected_num_records"] = 1
+        postprocessor_conf = config["trainer"]["meters"]["val"]["all"]["counting"]["postprocessor"]
+        dataset_conf = config["trainer"]["data"]["val"]["dataset"]
+        collate_conf = config["trainer"]["data"]["val"]["collate_fn"]
 
-        config["launcher"]["gpus_per_node"] = self.num_gpus
-        config["launcher"]["experiment_log_dir"] = str(run_dir)
+        model = instantiate(OmegaConf.create(model_conf), _convert_="all")
+        model.eval()
+        postprocessor = instantiate(OmegaConf.create(postprocessor_conf), _convert_="all")
+        collate_fn = instantiate(OmegaConf.create(collate_conf), _convert_="all")
 
-        path.write_text(yaml.safe_dump(config, sort_keys=False, allow_unicode=True), encoding="utf-8")
+        self._runtime = {
+            "model": model,
+            "postprocessor": postprocessor,
+            "dataset_conf": dataset_conf,
+            "collate_fn": collate_fn,
+        }
+        return self._runtime
 
-    def _run(self, config_path: Path) -> None:
-        env = os.environ.copy()
-        env["PYTHONPATH"] = str(self.repo_root) + os.pathsep + env.get("PYTHONPATH", "")
-        # Kaggle/Jupyter often sets MPLBACKEND=module://matplotlib_inline.backend_inline.
-        # That backend is not available in this isolated uv environment, and torchmetrics
-        # imports matplotlib during trainer setup. Force a headless-safe backend for inference.
-        env["MPLBACKEND"] = "Agg"
-        subprocess.run(
-            [
-                self.python_executable,
-                "-m",
-                "count_anything.train.train",
-                "-c",
-                str(config_path),
-                "--use-cluster",
-                "0",
-                "--num-gpus",
-                str(self.num_gpus),
-            ],
-            cwd=str(self.repo_root),
-            env=env,
-            check=True,
-        )
+    def _run_direct(self, annotation_path: Path) -> Dict:
+        from hydra.utils import instantiate
+        from omegaconf import OmegaConf
+        from sam3.model.utils.misc import copy_data_to_device
 
-    @staticmethod
-    def _load_record(detail_path: Path) -> Dict:
-        with detail_path.open("r", encoding="utf-8") as f:
-            records = json.load(f).get("predictions") or []
-        if not records:
-            raise RuntimeError(f"No prediction records were written to {detail_path}")
-        return records[0]
+        runtime = self._load_runtime()
+        dataset_conf = dict(runtime["dataset_conf"])
+        dataset_conf["ann_file"] = str(annotation_path)
+        dataset_conf["img_folder"] = "/"
+        dataset_conf["training"] = False
+        dataset_conf["use_caching"] = False
+        dataset = instantiate(OmegaConf.create(dataset_conf), _convert_="all")
+        batch_dict = runtime["collate_fn"]([dataset[0]])
+        _, batch = batch_dict.popitem()
+        batch = copy_data_to_device(batch, torch.device(self.device), non_blocking=True)
+
+        amp_enabled = self.device == "cuda"
+        with torch.inference_mode():
+            with torch.amp.autocast(
+                device_type="cuda",
+                enabled=amp_enabled,
+                dtype=torch.bfloat16,
+            ):
+                find_stages = runtime["model"](batch)
+
+        for stage_outputs, stage_meta in zip(find_stages, batch.find_metadatas):
+            predictions = runtime["postprocessor"](
+                outputs=stage_outputs,
+                original_sizes=stage_meta.original_size,
+                processed_scales_xy=getattr(stage_meta, "processed_scale_xy", None),
+                processed_offsets_xy=getattr(stage_meta, "processed_offset_xy", None),
+            )
+            if predictions:
+                pred = predictions[0]
+                raw_points = pred["pred_count_points"].detach().cpu().tolist()
+                raw_scores = pred["pred_count_scores"].detach().cpu().tolist()
+                points = [
+                    {"x": float(point[0]), "y": float(point[1]), "score": float(score)}
+                    for point, score in zip(raw_points, raw_scores)
+                ]
+                return {
+                    "pred_count": int(pred["pred_count"]),
+                    "points": points,
+                    "scores": raw_scores,
+                }
+        raise RuntimeError("No prediction records were produced")
 
 
 __all__ = ["CountAnything", "CountAnythingResult"]
