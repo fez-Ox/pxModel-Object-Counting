@@ -3,6 +3,8 @@
 
 Usage:
   python infer.py image.jpg "red cars"
+  python infer.py images/ "red cars"
+  python infer.py images/ "red cars" --recursive
   python infer.py https://example.com/image.jpg "red cars"
   python infer.py image1.jpg https://example.com/image2.png "people" --out results/
   python infer.py --checkpoint checkpoints/count_anything.pt image.jpg "dogs"
@@ -21,6 +23,7 @@ from urllib.parse import unquote, urlparse
 
 REPO_ROOT = Path(__file__).resolve().parent
 DEFAULT_CKPT = REPO_ROOT / "checkpoints" / "count_anything.pt"
+IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".bmp", ".gif", ".webp", ".tif", ".tiff"}
 
 
 def _is_url(value):
@@ -58,6 +61,31 @@ def _display_name(value):
     return Path(value).name
 
 
+def _is_image_file(path):
+    return path.is_file() and path.suffix.lower() in IMAGE_EXTENSIONS
+
+
+def _expand_image_inputs(inputs, recursive=False):
+    expanded = []
+    for value in inputs:
+        if _is_url(value):
+            expanded.append(value)
+            continue
+
+        path = Path(value).expanduser()
+        if path.is_dir():
+            iterator = path.rglob("*") if recursive else path.iterdir()
+            images = sorted(p for p in iterator if _is_image_file(p))
+            if not images:
+                print(f"Skip: {value} — no supported image files found", file=sys.stderr)
+                continue
+            expanded.extend(str(p) for p in images)
+            continue
+
+        expanded.append(value)
+    return expanded
+
+
 def _resolve_checkpoint(path):
     p = Path(path).expanduser()
     if not p.is_absolute():
@@ -75,7 +103,7 @@ def main():
     parser = argparse.ArgumentParser(
         description="Count objects in an image using a text query (CountAnything)."
     )
-    parser.add_argument("images", nargs="+", help="Path(s) or http(s) URL(s) to image(s)")
+    parser.add_argument("images", nargs="+", help="Path(s), folder(s), or http(s) URL(s) to image(s)")
     parser.add_argument("query", help="Text description of objects to count (e.g. 'red cars')")
     parser.add_argument(
         "--checkpoint", "-c",
@@ -98,6 +126,11 @@ def main():
         default=30,
         help="Timeout in seconds for downloading image URLs (default: 30)",
     )
+    parser.add_argument(
+        "--recursive", "-r",
+        action="store_true",
+        help="When an image argument is a folder, include images from subfolders too",
+    )
     args = parser.parse_args()
 
     ckpt = _resolve_checkpoint(args.checkpoint)
@@ -106,8 +139,13 @@ def main():
 
     model = CountAnything(checkpoint=ckpt, output_dir=args.out or str(REPO_ROOT / "exp" / "count_anything_inference"))
 
+    image_inputs = _expand_image_inputs(args.images, recursive=args.recursive)
+    if not image_inputs:
+        print("Error: no images to process", file=sys.stderr)
+        sys.exit(1)
+
     with tempfile.TemporaryDirectory(prefix="count_anything_infer_") as tmp_dir:
-        for img_path in args.images:
+        for img_path in image_inputs:
             if _is_url(img_path):
                 print(f"Downloading: {img_path}")
                 try:

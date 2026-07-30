@@ -9,6 +9,8 @@ cd count-anything
 uv sync
 uv run python download_checkpoint.py
 uv run python infer.py /path/to/image.jpg "cars"
+uv run python infer.py /path/to/image_folder "cars"
+uv run python infer.py /path/to/image_folder "cars" --recursive
 uv run python infer.py "https://example.com/image.jpg" "cars"
 ```
 
