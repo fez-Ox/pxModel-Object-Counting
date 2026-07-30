@@ -13,6 +13,7 @@ import mimetypes
 import shutil
 import sys
 import tempfile
+import time
 import urllib.error
 import urllib.request
 from pathlib import Path
@@ -121,16 +122,20 @@ def main():
                     continue
 
             print(f"Processing: {_display_name(img_path)}")
+            start_time = time.perf_counter()
             try:
                 results = model(str(p.resolve()), args.query)
             except Exception as e:
-                print(f"  Error: {e}", file=sys.stderr)
+                elapsed = time.perf_counter() - start_time
+                print(f"  Error after {elapsed:.2f}s: {e}", file=sys.stderr)
                 continue
+            elapsed = time.perf_counter() - start_time
 
             for r in results:
                 saved = r.save()
                 print(f"  Count: {r.count}")
                 print(f"  Points: {len(r.pred_points)}")
+                print(f"  Inference time: {elapsed:.2f}s")
                 print(f"  Saved: {saved}")
                 if args.show:
                     r.show()
