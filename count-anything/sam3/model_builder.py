@@ -3,9 +3,8 @@
 # pyre-unsafe
 
 import os
+from importlib import resources
 from typing import Optional
-
-import pkg_resources
 
 import torch
 import torch.nn as nn
@@ -67,6 +66,11 @@ except ImportError:  # pragma: no cover - optional dependency for HF fallback on
 
 def _get_repo_root():
     return os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+
+def _sam3_resource_path(relative_path: str) -> str:
+    """Return a filesystem path for a resource bundled under the sam3 package."""
+    return str(resources.files("sam3").joinpath(relative_path))
 
 
 def _resolve_local_checkpoint_path():
@@ -748,9 +752,7 @@ def build_sam3_image_model(
     )
 
     if bpe_path is None:
-        bpe_path = pkg_resources.resource_filename(
-            "sam3", "assets/bpe_simple_vocab_16e6.txt.gz"
-        )
+        bpe_path = _sam3_resource_path("assets/bpe_simple_vocab_16e6.txt.gz")
 
     # Create visual components
     compile_mode = "default" if compile else None
@@ -874,9 +876,7 @@ def build_sam3_video_model(
         Sam3VideoInferenceWithInstanceInteractivity: The instantiated dense tracking model
     """
     if bpe_path is None:
-        bpe_path = pkg_resources.resource_filename(
-            "sam3", "assets/bpe_simple_vocab_16e6.txt.gz"
-        )
+        bpe_path = _sam3_resource_path("assets/bpe_simple_vocab_16e6.txt.gz")
 
     # Build Tracker module
     tracker = build_tracker(apply_temporal_disambiguation=apply_temporal_disambiguation)
