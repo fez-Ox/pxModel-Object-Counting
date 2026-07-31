@@ -11,16 +11,13 @@ Run these commands from a Kaggle notebook after cloning the repository:
 ```bash
 cd sam3-verbose-counting
 uv sync
-
-# SAM3 may require accepted Hugging Face model terms and authentication.
-uv run hf auth login
 uv run python download_model.py
 ```
 
-Alternatively, provide a token directly:
+The downloader uses a direct HTTP URL and does not require Hugging Face CLI login or notebook authentication setup. Override the URL when using a mirror:
 
 ```bash
-HF_TOKEN=hf_... uv run python download_model.py
+uv run python download_model.py --url https://example.com/sam3.pt
 ```
 
 The downloader places the checkpoint at:
@@ -29,7 +26,11 @@ The downloader places the checkpoint at:
 sam3-verbose-counting/checkpoints/sam3.pt
 ```
 
-The checkpoint is not downloaded automatically by inference.
+The checkpoint is not downloaded automatically by inference. The default source is:
+
+```text
+https://huggingface.co/facebook/sam3/resolve/main/sam3.pt
+```
 
 ## Inference
 

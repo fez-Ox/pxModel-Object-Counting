@@ -1,65 +1,60 @@
 #!/usr/bin/env python3
-"""Download the native SAM3 checkpoint into the standalone application.
-
-The SAM3 repository may require a Hugging Face account, accepted model terms,
-and an access token. Authenticate first with ``hf auth login`` or set
-``HF_TOKEN`` in the notebook environment.
-"""
+"""Download the native SAM3 checkpoint directly for notebook use."""
 
 from __future__ import annotations
 
 import argparse
-import os
 import shutil
+import urllib.error
+import urllib.request
 from pathlib import Path
 
-DEFAULT_REPO_ID = "facebook/sam3"
-DEFAULT_FILENAME = "sam3.pt"
+DEFAULT_URL = "https://huggingface.co/facebook/sam3/resolve/main/sam3.pt"
 APP_ROOT = Path(__file__).resolve().parent
-DEFAULT_OUTPUT = APP_ROOT / "checkpoints" / DEFAULT_FILENAME
+DEFAULT_OUTPUT = APP_ROOT / "checkpoints" / "sam3.pt"
 
 
-def download_model(
-    *,
-    repo_id: str,
-    filename: str,
-    output: Path,
-    revision: str,
-    force: bool,
-) -> Path:
+def download_model(*, url: str, output: Path, force: bool, timeout: int) -> Path:
     output = output.expanduser().resolve()
     if output.exists() and not force:
         print(f"SAM3 checkpoint already exists: {output}")
         print("Use --force to download it again.")
         return output
 
-    try:
-        from huggingface_hub import hf_hub_download
-    except ImportError as exc:  # pragma: no cover - depends on environment setup
-        raise SystemExit("Install dependencies first with: uv sync") from exc
-
     output.parent.mkdir(parents=True, exist_ok=True)
     temporary = output.with_name(output.name + ".part")
     temporary.unlink(missing_ok=True)
+    request = urllib.request.Request(
+        url,
+        headers={"User-Agent": "sam3-verbose-counting/1.0"},
+    )
 
-    token = os.environ.get("HF_TOKEN")
-    print(f"Downloading {repo_id}/{filename} ({revision=})")
+    print(f"Downloading: {url}")
     print(f"Destination: {output}")
     try:
-        cached = hf_hub_download(
-            repo_id=repo_id,
-            filename=filename,
-            revision=revision,
-            token=token,
-        )
-        shutil.copyfile(cached, temporary)
-        temporary.replace(output)
-    except Exception as exc:
+        with urllib.request.urlopen(request, timeout=timeout) as response, temporary.open("wb") as stream:
+            total = int(response.headers.get("Content-Length") or 0)
+            downloaded = 0
+            while True:
+                chunk = response.read(1024 * 1024)
+                if not chunk:
+                    break
+                stream.write(chunk)
+                downloaded += len(chunk)
+                if total:
+                    percent = downloaded * 100 / total
+                    print(
+                        f"\r{downloaded / (1024 ** 2):.1f} / "
+                        f"{total / (1024 ** 2):.1f} MiB ({percent:.1f}%)",
+                        end="",
+                    )
+                else:
+                    print(f"\r{downloaded / (1024 ** 2):.1f} MiB", end="")
+            print()
+        shutil.move(str(temporary), str(output))
+    except (urllib.error.HTTPError, urllib.error.URLError, TimeoutError, OSError) as exc:
         temporary.unlink(missing_ok=True)
-        raise SystemExit(
-            "SAM3 download failed. Verify Hugging Face access, accepted model "
-            f"terms, and HF_TOKEN/authentication: {exc}"
-        ) from exc
+        raise SystemExit(f"SAM3 download failed: {exc}") from exc
 
     if output.stat().st_size == 0:
         output.unlink(missing_ok=True)
@@ -71,21 +66,19 @@ def download_model(
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Download the native SAM3 checkpoint for verbose-prompt counting."
+        description="Download the native SAM3 checkpoint directly over HTTP."
     )
-    parser.add_argument("--repo-id", default=DEFAULT_REPO_ID, help="Hugging Face repository")
-    parser.add_argument("--filename", default=DEFAULT_FILENAME, help="Repository filename")
-    parser.add_argument("--revision", default="main", help="Hugging Face revision")
+    parser.add_argument("--url", default=DEFAULT_URL, help="Direct checkpoint URL")
     parser.add_argument("--output", "-o", default=str(DEFAULT_OUTPUT), help="Local checkpoint path")
+    parser.add_argument("--timeout", type=int, default=120, help="Download timeout in seconds")
     parser.add_argument("--force", action="store_true", help="Replace an existing checkpoint")
     args = parser.parse_args()
 
     download_model(
-        repo_id=args.repo_id,
-        filename=args.filename,
+        url=args.url,
         output=Path(args.output),
-        revision=args.revision,
         force=args.force,
+        timeout=args.timeout,
     )
 
 
