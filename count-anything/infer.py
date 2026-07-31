@@ -174,6 +174,11 @@ def main():
                 print(f"  Count: {r.count}")
                 print(f"  Points: {len(r.pred_points)}")
                 print(f"  Inference time: {elapsed:.2f}s")
+                if r.peak_vram_mb is not None:
+                    print(f"  Peak VRAM allocated: {r.peak_vram_mb:.1f} MiB")
+                    print(f"  Peak VRAM reserved: {r.peak_reserved_vram_mb:.1f} MiB")
+                else:
+                    print("  Peak VRAM: unavailable (CPU inference)")
                 print(f"  Saved: {saved}")
                 if args.show:
                     r.show()

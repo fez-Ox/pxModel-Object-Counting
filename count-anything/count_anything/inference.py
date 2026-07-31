@@ -25,6 +25,8 @@ class CountAnythingResult:
     count: int
     pred_points: List[Dict[str, float]]
     run_dir: str
+    peak_vram_mb: float | None = None
+    peak_reserved_vram_mb: float | None = None
 
     def _render(self):
         try:
@@ -68,6 +70,8 @@ class CountAnythingResult:
             "text_query": self.text_query,
             "count": self.count,
             "points": self.pred_points,
+            "peak_vram_mb": self.peak_vram_mb,
+            "peak_reserved_vram_mb": self.peak_reserved_vram_mb,
         }
 
     def save_json(self, path: str | os.PathLike | None = None) -> str:
@@ -133,6 +137,8 @@ class CountAnything:
                 count=int(record["pred_count"]),
                 pred_points=record.get("points", []),
                 run_dir=str(run_dir),
+                peak_vram_mb=record.get("peak_vram_mb"),
+                peak_reserved_vram_mb=record.get("peak_reserved_vram_mb"),
             )
         ]
 
@@ -217,14 +223,30 @@ class CountAnything:
         _, batch = batch_dict.popitem()
         batch = copy_data_to_device(batch, torch.device(self.device), non_blocking=True)
 
-        amp_enabled = self.device == "cuda"
+        device = torch.device(self.device)
+        is_cuda = device.type == "cuda"
+        if is_cuda:
+            # Synchronize so allocations from preprocessing are not counted as
+            # asynchronous work from the forward pass, then start a fresh peak.
+            torch.cuda.synchronize(device)
+            torch.cuda.reset_peak_memory_stats(device)
+
         with torch.inference_mode():
             with torch.amp.autocast(
-                device_type="cuda",
-                enabled=amp_enabled,
+                device_type=device.type,
+                enabled=is_cuda,
                 dtype=torch.bfloat16,
             ):
                 find_stages = runtime["model"](batch)
+
+        if is_cuda:
+            # CUDA kernels are asynchronous; synchronize before reading peak stats.
+            torch.cuda.synchronize(device)
+            peak_vram_mb = torch.cuda.max_memory_allocated(device) / (1024 ** 2)
+            peak_reserved_vram_mb = torch.cuda.max_memory_reserved(device) / (1024 ** 2)
+        else:
+            peak_vram_mb = None
+            peak_reserved_vram_mb = None
 
         for stage_outputs, stage_meta in zip(find_stages, batch.find_metadatas):
             predictions = runtime["postprocessor"](
@@ -245,6 +267,8 @@ class CountAnything:
                     "pred_count": int(pred["pred_count"]),
                     "points": points,
                     "scores": raw_scores,
+                    "peak_vram_mb": peak_vram_mb,
+                    "peak_reserved_vram_mb": peak_reserved_vram_mb,
                 }
         raise RuntimeError("No prediction records were produced")
 
