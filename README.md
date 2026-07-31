@@ -15,3 +15,7 @@ uv run python infer.py "https://example.com/image.jpg" "cars"
 ```
 
 `count-anything/pyproject.toml` contains the CountAnything inference dependencies for UV. The checkpoint downloader saves the model to `count-anything/checkpoints/count_anything.pt`, which is the default path used by `infer.py`.
+
+## Native SAM3 verbose-prompt counting
+
+For an independent native-SAM3 pipeline that counts objects from verbose natural-language prompts, see [`sam3-verbose-counting/README.md`](sam3-verbose-counting/README.md).
