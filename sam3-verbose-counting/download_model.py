@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 import shutil
 import urllib.error
 import urllib.request
@@ -14,7 +15,30 @@ APP_ROOT = Path(__file__).resolve().parent
 DEFAULT_OUTPUT = APP_ROOT / "checkpoints" / "sam3.pt"
 
 
-def download_model(*, url: str, output: Path, force: bool, timeout: int) -> Path:
+def _get_token(explicit_token: str | None = None) -> str | None:
+    if explicit_token:
+        return explicit_token
+    token = os.environ.get("HF_TOKEN") or os.environ.get("HUGGINGFACE_HUB_TOKEN")
+    if token:
+        return token
+
+    # Kaggle notebooks can expose a secret without requiring `hf auth login`.
+    try:
+        from kaggle_secrets import UserSecretsClient
+
+        return UserSecretsClient().get_secret("HF_TOKEN")
+    except Exception:
+        return None
+
+
+def download_model(
+    *,
+    url: str,
+    output: Path,
+    force: bool,
+    timeout: int,
+    token: str | None = None,
+) -> Path:
     output = output.expanduser().resolve()
     if output.exists() and not force:
         print(f"SAM3 checkpoint already exists: {output}")
@@ -24,10 +48,11 @@ def download_model(*, url: str, output: Path, force: bool, timeout: int) -> Path
     output.parent.mkdir(parents=True, exist_ok=True)
     temporary = output.with_name(output.name + ".part")
     temporary.unlink(missing_ok=True)
-    request = urllib.request.Request(
-        url,
-        headers={"User-Agent": "sam3-verbose-counting/1.0"},
-    )
+    headers = {"User-Agent": "sam3-verbose-counting/1.0"}
+    token = _get_token(token)
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    request = urllib.request.Request(url, headers=headers)
 
     print(f"Downloading: {url}")
     print(f"Destination: {output}")
@@ -52,7 +77,16 @@ def download_model(*, url: str, output: Path, force: bool, timeout: int) -> Path
                     print(f"\r{downloaded / (1024 ** 2):.1f} MiB", end="")
             print()
         shutil.move(str(temporary), str(output))
-    except (urllib.error.HTTPError, urllib.error.URLError, TimeoutError, OSError) as exc:
+    except urllib.error.HTTPError as exc:
+        temporary.unlink(missing_ok=True)
+        if exc.code == 401:
+            raise SystemExit(
+                "SAM3 returned HTTP 401. The official SAM3 checkpoint is gated. "
+                "Request/receive access on Hugging Face, then add the approved "
+                "token as a Kaggle Secret named HF_TOKEN (or pass --token)."
+            ) from exc
+        raise SystemExit(f"SAM3 download failed: {exc}") from exc
+    except (urllib.error.URLError, TimeoutError, OSError) as exc:
         temporary.unlink(missing_ok=True)
         raise SystemExit(f"SAM3 download failed: {exc}") from exc
 
@@ -71,6 +105,11 @@ def main() -> None:
     parser.add_argument("--url", default=DEFAULT_URL, help="Direct checkpoint URL")
     parser.add_argument("--output", "-o", default=str(DEFAULT_OUTPUT), help="Local checkpoint path")
     parser.add_argument("--timeout", type=int, default=120, help="Download timeout in seconds")
+    parser.add_argument(
+        "--token",
+        default=None,
+        help="Optional Hugging Face token; Kaggle Secret HF_TOKEN is auto-detected",
+    )
     parser.add_argument("--force", action="store_true", help="Replace an existing checkpoint")
     args = parser.parse_args()
 
@@ -79,6 +118,7 @@ def main() -> None:
         output=Path(args.output),
         force=args.force,
         timeout=args.timeout,
+        token=args.token,
     )
 
 

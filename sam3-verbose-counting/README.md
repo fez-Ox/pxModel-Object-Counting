@@ -14,7 +14,19 @@ uv sync
 uv run python download_model.py
 ```
 
-The downloader uses a direct HTTP URL and does not require Hugging Face CLI login or notebook authentication setup. Override the URL when using a mirror:
+The downloader uses a direct HTTP URL and does not require Hugging Face CLI login. The official SAM3 checkpoint is gated upstream, so an approved Hugging Face token is still required for that URL. In Kaggle, add a notebook Secret named `HF_TOKEN`; the script detects it automatically:
+
+```bash
+uv run python download_model.py
+```
+
+No CLI login is needed. You can also pass a token explicitly:
+
+```bash
+uv run python download_model.py --token "$HF_TOKEN"
+```
+
+Override the URL when using a permitted mirror:
 
 ```bash
 uv run python download_model.py --url https://example.com/sam3.pt
@@ -26,7 +38,7 @@ The downloader places the checkpoint at:
 sam3-verbose-counting/checkpoints/sam3.pt
 ```
 
-The checkpoint is not downloaded automatically by inference. The default source is:
+The checkpoint is not downloaded automatically by inference. If you cannot access the gated URL, attach a permitted `sam3.pt` file as a Kaggle dataset and point inference at it with `--checkpoint`. The default source is:
 
 ```text
 https://huggingface.co/facebook/sam3/resolve/main/sam3.pt
