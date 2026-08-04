@@ -83,6 +83,36 @@ Useful options:
 --device cuda         Inference device
 --no-amp              Disable CUDA mixed precision
 --show                Display visualizations
+--filter-prompt P     Exclude targets overlapping a second detection (e.g. "faces of people")
+--no-filter-center    Don't drop a target whose center is inside a filter box
+--filter-iou 0.3      Also drop targets whose IoU with a filter box reaches 0.3
+```
+
+### Overlap filter
+
+SAM3 cannot distinguish a *worn* pair of sunglasses from a *displayed* pair
+using text alone (``"not being worn"`` has no pixel counterpart). To exclude
+objects that sit on a person, run a second pass for the person/face and drop
+any target overlapping it:
+
+```bash
+uv run python infer.py image.jpg \
+  "pairs of sunglasses displayed on the retail rack" \
+  --filter-prompt "faces of people"
+```
+
+A target box is removed when its **center lies inside** a filter detection
+(`--filter-center`, on by default) or its **IoU** with one reaches
+`--filter-iou`. The JSON output keeps the unfiltered `raw_count` /
+`raw_boxes` / `raw_scores` alongside the filtered `count` so the decision can
+be audited. Filtering is also available through the library API:
+
+```python
+from infer import build_counter
+counter = build_counter(threshold=0.5)
+result = counter.infer(image_path, "pairs of sunglasses displayed on the retail rack",
+                       filter_prompt="faces of people", filter_center=True, filter_iou=0.0)
+print(result["count"], "after dropping", result["filtered_count"], "worn pairs")
 ```
 
 Each image produces a JSON file and annotated JPG containing:

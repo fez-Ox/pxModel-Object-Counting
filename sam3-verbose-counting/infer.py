@@ -43,6 +43,7 @@ __all__ = [
     "Sam3VerboseCounter",
     "build_counter",
     "annotate",
+    "filter_overlapping",
     "resolve_checkpoint",
     "cuda_available",
     "image_path_to_pil",
@@ -177,6 +178,59 @@ def annotate(image_path: Path, prompt: str, boxes: list[list[float]], scores: li
     return image
 
 
+def _box_area(box: list[float]) -> float:
+    x0, y0, x1, y1 = box
+    return max(0.0, x1 - x0) * max(0.0, y1 - y0)
+
+
+def _box_iou(a: list[float], b: list[float]) -> float:
+    x0, y0 = max(a[0], b[0]), max(a[1], b[1])
+    x1, y1 = min(a[2], b[2]), min(a[3], b[3])
+    inter = max(0.0, x1 - x0) * max(0.0, y1 - y0)
+    union = _box_area(a) + _box_area(b) - inter
+    return inter / union if union > 0 else 0.0
+
+
+def _box_center_in_box(target: list[float], ref: list[float]) -> bool:
+    cx = (target[0] + target[2]) / 2.0
+    cy = (target[1] + target[3]) / 2.0
+    return ref[0] <= cx <= ref[2] and ref[1] <= cy <= ref[3]
+
+
+def filter_overlapping(
+    target_boxes: list[list[float]],
+    target_scores: list[float],
+    filter_boxes: list[list[float]],
+    *,
+    center: bool = True,
+    iou: float = 0.0,
+) -> tuple[list[list[float]], list[float], list[int]]:
+    """Drop target boxes that overlap any filter box.
+
+    A target box is removed when its center lies inside a filter box
+    (``center=True``) or its IoU with any filter box reaches ``iou``.
+    Both criteria may be active at once; a match on either removes the box.
+
+    Returns ``(kept_boxes, kept_scores, removed_indices)``. All boxes are in
+    ``[x0, y0, x1, y1]`` pixel coordinates.
+    """
+    kept_boxes: list[list[float]] = []
+    kept_scores: list[float] = []
+    removed: list[int] = []
+    for index, (box, score) in enumerate(zip(target_boxes, target_scores)):
+        overlap = any(
+            (center and _box_center_in_box(box, ref))
+            or (iou > 0 and _box_iou(box, ref) >= iou)
+            for ref in filter_boxes
+        )
+        if overlap:
+            removed.append(index)
+        else:
+            kept_boxes.append(box)
+            kept_scores.append(score)
+    return kept_boxes, kept_scores, removed
+
+
 class Sam3VerboseCounter:
     """Persistent native SAM3 image counter."""
 
@@ -207,7 +261,26 @@ class Sam3VerboseCounter:
         dtype = self.torch.bfloat16 if capability[0] >= 8 else self.torch.float16
         return self.torch.autocast(device_type="cuda", dtype=dtype)
 
-    def infer(self, image_path: Path, prompt: str) -> dict:
+    def infer(
+        self,
+        image_path: Path,
+        prompt: str,
+        *,
+        filter_prompt: str | None = None,
+        filter_center: bool = True,
+        filter_iou: float = 0.0,
+    ) -> dict:
+        """Count objects matching ``prompt``, optionally filtered.
+
+        When ``filter_prompt`` is given, a second SAM3 pass runs on the same
+        image to localize the filter objects (e.g. ``"faces of people"``), and
+        every target box whose center lands inside a filter box
+        (``filter_center``) or whose IoU with one reaches ``filter_iou`` is
+        dropped from the count.
+
+        The unfiltered detections are kept on the result under ``raw_boxes`` /
+        ``raw_scores`` / ``raw_count`` so the filtering decision can be audited.
+        """
         torch = self.torch
         is_cuda = self.device.type == "cuda"
         if is_cuda:
@@ -226,6 +299,22 @@ class Sam3VerboseCounter:
                 torch.cuda.synchronize(self.device)
             raise
 
+        target_boxes = state.get("boxes", torch.empty((0, 4))).detach().cpu().tolist()
+        target_scores = state.get("scores", torch.empty((0,))).detach().cpu().tolist()
+
+        filter_boxes: list[list[float]] = []
+        if filter_prompt:
+            try:
+                with torch.inference_mode(), self._autocast():
+                    state = self.processor.set_text_prompt(filter_prompt, state)
+                if is_cuda:
+                    torch.cuda.synchronize(self.device)
+            except Exception:
+                if is_cuda:
+                    torch.cuda.synchronize(self.device)
+                raise
+            filter_boxes = state.get("boxes", torch.empty((0, 4))).detach().cpu().tolist()
+
         elapsed = time.perf_counter() - start
         if is_cuda:
             peak_allocated = torch.cuda.max_memory_allocated(self.device) / (1024**2)
@@ -234,18 +323,40 @@ class Sam3VerboseCounter:
             peak_allocated = None
             peak_reserved = None
 
-        boxes = state.get("boxes", torch.empty((0, 4))).detach().cpu().tolist()
-        scores = state.get("scores", torch.empty((0,))).detach().cpu().tolist()
+        if filter_boxes:
+            kept_boxes, kept_scores, removed = filter_overlapping(
+                target_boxes,
+                target_scores,
+                filter_boxes,
+                center=filter_center,
+                iou=filter_iou,
+            )
+        else:
+            kept_boxes, kept_scores, removed = target_boxes, target_scores, []
+
         # Release image features before processing the next image.
         state.clear()
-        return {
-            "count": len(boxes),
-            "boxes": [[float(value) for value in box] for box in boxes],
-            "scores": [float(value) for value in scores],
+
+        result = {
+            "count": len(kept_boxes),
+            "boxes": [[float(value) for value in box] for box in kept_boxes],
+            "scores": [float(value) for value in kept_scores],
             "inference_time_seconds": elapsed,
             "peak_vram_mb": peak_allocated,
             "peak_reserved_vram_mb": peak_reserved,
         }
+        if filter_prompt:
+            result.update(
+                {
+                    "raw_count": len(target_boxes),
+                    "raw_boxes": [[float(value) for value in box] for box in target_boxes],
+                    "raw_scores": [float(value) for value in target_scores],
+                    "filtered_count": len(removed),
+                    "filter_prompt": filter_prompt,
+                    "filter_object_count": len(filter_boxes),
+                }
+            )
+        return result
 
 
 def build_counter(
@@ -351,7 +462,31 @@ def main() -> None:
         action="store_true",
         help="Display each visualization if a display is available",
     )
+    parser.add_argument(
+        "--filter-prompt",
+        default=None,
+        help="Second prompt whose detections suppress target boxes "
+        "(e.g. 'faces of people'); any target box overlapping a "
+        "detection is dropped from the count",
+    )
+    parser.add_argument(
+        "--filter-center",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Drop a target box when its center lies inside a filter detection "
+        "(default: on; use --no-filter-center to disable)",
+    )
+    parser.add_argument(
+        "--filter-iou",
+        type=float,
+        default=0.0,
+        help="Also drop a target box when its IoU with any filter detection "
+        "reaches this value (default: 0.0 = disabled)",
+    )
     args = parser.parse_args()
+
+    if args.filter_prompt and not (args.filter_center or args.filter_iou > 0):
+        parser.error("--filter-prompt needs --filter-center and/or --filter-iou > 0")
 
     try:
         checkpoint = resolve_checkpoint(args.checkpoint)
@@ -394,7 +529,13 @@ def main() -> None:
 
             print(f"Processing: {_display_name(value)}")
             try:
-                result = counter.infer(image_path.resolve(), args.prompt)
+                result = counter.infer(
+                    image_path.resolve(),
+                    args.prompt,
+                    filter_prompt=args.filter_prompt,
+                    filter_center=args.filter_center,
+                    filter_iou=args.filter_iou,
+                )
             except Exception as exc:
                 print(f"  Error: {exc}", file=sys.stderr)
                 continue
@@ -422,6 +563,12 @@ def main() -> None:
 
             print(f"  Count: {result['count']}")
             print(f"  Boxes: {len(result['boxes'])}")
+            if "raw_count" in result:
+                print(
+                    f"  (after filter: raw={result['raw_count']}, "
+                    f"removed={result['filtered_count']}, "
+                    f"filter objects={result['filter_object_count']})"
+                )
             print(f"  Inference time: {result['inference_time_seconds']:.2f}s")
             if result["peak_vram_mb"] is not None:
                 print(f"  Peak VRAM allocated: {result['peak_vram_mb']:.1f} MiB")
