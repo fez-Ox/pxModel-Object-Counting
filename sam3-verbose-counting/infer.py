@@ -44,6 +44,7 @@ __all__ = [
     "build_counter",
     "annotate",
     "filter_overlapping",
+    "suppress_redundant_boxes",
     "resolve_checkpoint",
     "cuda_available",
     "image_path_to_pil",
@@ -231,6 +232,73 @@ def filter_overlapping(
     return kept_boxes, kept_scores, removed
 
 
+def suppress_redundant_boxes(
+    boxes: list[list[float]],
+    scores: list[float],
+    *,
+    duplicate_iou: float = 0.9,
+    min_children: int = 2,
+    min_enclosing_area_ratio: float = 1.25,
+) -> tuple[list[list[float]], list[float], list[int]]:
+    """Remove duplicate and multi-instance enclosing detections.
+
+    SAM3 can return both one broad box around multiple objects and separate
+    boxes for each object. A broad box is redundant when it contains at least
+    ``min_children`` distinct smaller boxes by center position. Near-identical
+    boxes are also reduced to the highest-scoring detection.
+
+    Returns ``(kept_boxes, kept_scores, removed_indices)``. Indices refer to
+    the original input lists, and kept detections retain their input order.
+    """
+    if len(boxes) != len(scores):
+        raise ValueError("boxes and scores must have the same length")
+    if not 0.0 < duplicate_iou <= 1.0:
+        raise ValueError("duplicate_iou must be greater than 0 and at most 1")
+    if min_children < 2:
+        raise ValueError("min_children must be at least 2")
+    if min_enclosing_area_ratio < 1.0:
+        raise ValueError("min_enclosing_area_ratio must be at least 1")
+
+    removed: set[int] = set()
+
+    # Keep the highest-scoring box among near-identical detections.
+    ranked = sorted(range(len(boxes)), key=lambda index: float(scores[index]), reverse=True)
+    kept_for_duplicates: list[int] = []
+    for index in ranked:
+        if any(
+            _box_iou(boxes[index], boxes[kept]) >= duplicate_iou
+            for kept in kept_for_duplicates
+        ):
+            removed.add(index)
+        else:
+            kept_for_duplicates.append(index)
+
+    # A parent box containing multiple distinct children is an aggregate
+    # detection, not another object. Ignore duplicate boxes already removed.
+    active = [index for index in range(len(boxes)) if index not in removed]
+    for parent in active:
+        parent_area = _box_area(boxes[parent])
+        if parent_area <= 0:
+            continue
+        child_count = 0
+        for child in active:
+            if child == parent:
+                continue
+            child_area = _box_area(boxes[child])
+            if (
+                child_area > 0
+                and parent_area >= child_area * min_enclosing_area_ratio
+                and _box_center_in_box(boxes[child], boxes[parent])
+            ):
+                child_count += 1
+        if child_count >= min_children:
+            removed.add(parent)
+
+    kept_boxes = [box for index, box in enumerate(boxes) if index not in removed]
+    kept_scores = [score for index, score in enumerate(scores) if index not in removed]
+    return kept_boxes, kept_scores, sorted(removed)
+
+
 class Sam3VerboseCounter:
     """Persistent native SAM3 image counter."""
 
@@ -269,6 +337,10 @@ class Sam3VerboseCounter:
         filter_prompt: str | None = None,
         filter_center: bool = True,
         filter_iou: float = 0.0,
+        box_cleanup: bool = True,
+        box_duplicate_iou: float = 0.9,
+        box_min_children: int = 2,
+        box_min_area_ratio: float = 1.25,
     ) -> dict:
         """Count objects matching ``prompt``, optionally filtered.
 
@@ -278,8 +350,9 @@ class Sam3VerboseCounter:
         (``filter_center``) or whose IoU with one reaches ``filter_iou`` is
         dropped from the count.
 
-        The unfiltered detections are kept on the result under ``raw_boxes`` /
-        ``raw_scores`` / ``raw_count`` so the filtering decision can be audited.
+        Duplicate and multi-instance enclosing detections are removed by
+        default. The original detections are kept under ``raw_boxes`` /
+        ``raw_scores`` / ``raw_count`` so the cleanup decision can be audited.
         """
         torch = self.torch
         is_cuda = self.device.type == "cuda"
@@ -299,8 +372,22 @@ class Sam3VerboseCounter:
                 torch.cuda.synchronize(self.device)
             raise
 
-        target_boxes = state.get("boxes", torch.empty((0, 4))).detach().cpu().tolist()
-        target_scores = state.get("scores", torch.empty((0,))).detach().cpu().tolist()
+        raw_target_boxes = state.get("boxes", torch.empty((0, 4))).detach().cpu().tolist()
+        raw_target_scores = state.get("scores", torch.empty((0,))).detach().cpu().tolist()
+        if box_cleanup:
+            target_boxes, target_scores, redundant_removed = suppress_redundant_boxes(
+                raw_target_boxes,
+                raw_target_scores,
+                duplicate_iou=box_duplicate_iou,
+                min_children=box_min_children,
+                min_enclosing_area_ratio=box_min_area_ratio,
+            )
+        else:
+            target_boxes, target_scores, redundant_removed = (
+                raw_target_boxes,
+                raw_target_scores,
+                [],
+            )
 
         filter_boxes: list[list[float]] = []
         if filter_prompt:
@@ -324,7 +411,7 @@ class Sam3VerboseCounter:
             peak_reserved = None
 
         if filter_boxes:
-            kept_boxes, kept_scores, removed = filter_overlapping(
+            kept_boxes, kept_scores, filter_removed = filter_overlapping(
                 target_boxes,
                 target_scores,
                 filter_boxes,
@@ -332,7 +419,7 @@ class Sam3VerboseCounter:
                 iou=filter_iou,
             )
         else:
-            kept_boxes, kept_scores, removed = target_boxes, target_scores, []
+            kept_boxes, kept_scores, filter_removed = target_boxes, target_scores, []
 
         # Release image features before processing the next image.
         state.clear()
@@ -345,13 +432,20 @@ class Sam3VerboseCounter:
             "peak_vram_mb": peak_allocated,
             "peak_reserved_vram_mb": peak_reserved,
         }
+        if box_cleanup or filter_prompt:
+            result.update(
+                {
+                    "raw_count": len(raw_target_boxes),
+                    "raw_boxes": [[float(value) for value in box] for box in raw_target_boxes],
+                    "raw_scores": [float(value) for value in raw_target_scores],
+                    "deduplicated_count": len(target_boxes),
+                    "redundant_box_count": len(redundant_removed),
+                }
+            )
         if filter_prompt:
             result.update(
                 {
-                    "raw_count": len(target_boxes),
-                    "raw_boxes": [[float(value) for value in box] for box in target_boxes],
-                    "raw_scores": [float(value) for value in target_scores],
-                    "filtered_count": len(removed),
+                    "filtered_count": len(filter_removed),
                     "filter_prompt": filter_prompt,
                     "filter_object_count": len(filter_boxes),
                 }
@@ -483,10 +577,39 @@ def main() -> None:
         help="Also drop a target box when its IoU with any filter detection "
         "reaches this value (default: 0.0 = disabled)",
     )
+    parser.add_argument(
+        "--no-box-cleanup",
+        action="store_true",
+        help="Keep duplicate and multi-instance enclosing boxes",
+    )
+    parser.add_argument(
+        "--box-duplicate-iou",
+        type=float,
+        default=0.9,
+        help="IoU threshold for suppressing duplicate boxes (default: 0.9)",
+    )
+    parser.add_argument(
+        "--box-min-children",
+        type=int,
+        default=2,
+        help="Minimum contained instances needed to remove an enclosing box (default: 2)",
+    )
+    parser.add_argument(
+        "--box-min-area-ratio",
+        type=float,
+        default=1.25,
+        help="Minimum enclosing/child area ratio (default: 1.25)",
+    )
     args = parser.parse_args()
 
     if args.filter_prompt and not (args.filter_center or args.filter_iou > 0):
         parser.error("--filter-prompt needs --filter-center and/or --filter-iou > 0")
+    if not 0.0 < args.box_duplicate_iou <= 1.0:
+        parser.error("--box-duplicate-iou must be greater than 0 and at most 1")
+    if args.box_min_children < 2:
+        parser.error("--box-min-children must be at least 2")
+    if args.box_min_area_ratio < 1.0:
+        parser.error("--box-min-area-ratio must be at least 1")
 
     try:
         checkpoint = resolve_checkpoint(args.checkpoint)
@@ -535,6 +658,10 @@ def main() -> None:
                     filter_prompt=args.filter_prompt,
                     filter_center=args.filter_center,
                     filter_iou=args.filter_iou,
+                    box_cleanup=not args.no_box_cleanup,
+                    box_duplicate_iou=args.box_duplicate_iou,
+                    box_min_children=args.box_min_children,
+                    box_min_area_ratio=args.box_min_area_ratio,
                 )
             except Exception as exc:
                 print(f"  Error: {exc}", file=sys.stderr)
@@ -564,11 +691,12 @@ def main() -> None:
             print(f"  Count: {result['count']}")
             print(f"  Boxes: {len(result['boxes'])}")
             if "raw_count" in result:
-                print(
-                    f"  (after filter: raw={result['raw_count']}, "
-                    f"removed={result['filtered_count']}, "
-                    f"filter objects={result['filter_object_count']})"
-                )
+                print(f"  (model boxes: {result['raw_count']}, "
+                      f"after cleanup: {result['deduplicated_count']}, "
+                      f"enclosing/duplicate boxes removed: {result['redundant_box_count']})")
+            if "filtered_count" in result:
+                print(f"  (filter boxes: {result['filter_object_count']}, "
+                      f"target boxes removed by filter: {result['filtered_count']})")
             print(f"  Inference time: {result['inference_time_seconds']:.2f}s")
             if result["peak_vram_mb"] is not None:
                 print(f"  Peak VRAM allocated: {result['peak_vram_mb']:.1f} MiB")

@@ -86,6 +86,10 @@ Useful options:
 --filter-prompt P     Exclude targets overlapping a second detection (e.g. "faces of people")
 --no-filter-center    Don't drop a target whose center is inside a filter box
 --filter-iou 0.3      Also drop targets whose IoU with a filter box reaches 0.3
+--no-box-cleanup      Keep duplicate and multi-instance enclosing boxes
+--box-duplicate-iou 0.9  IoU threshold for duplicate-box suppression
+--box-min-children 2  Child detections required to remove an enclosing box
+--box-min-area-ratio 1.25  Minimum enclosing/child area ratio
 ```
 
 ### Overlap filter
@@ -114,6 +118,17 @@ result = counter.infer(image_path, "pairs of sunglasses displayed on the retail 
                        filter_prompt="faces of people", filter_center=True, filter_iou=0.0)
 print(result["count"], "after dropping", result["filtered_count"], "worn pairs")
 ```
+
+### Redundant-box cleanup
+
+SAM3 can emit one broad detection spanning multiple objects as well as a
+separate box for each object. Cleanup is enabled by default: near-identical
+boxes are reduced to the highest-scoring box, and an enclosing box is removed
+when it contains at least two smaller detections. The result keeps
+`raw_boxes` / `raw_scores` / `raw_count`, plus `deduplicated_count` and
+`redundant_box_count`, so brand-level localization can be inspected against
+the original model output. Tune the thresholds with the `--box-*` options or
+disable this behavior with `--no-box-cleanup`.
 
 Each image produces a JSON file and annotated JPG containing:
 
