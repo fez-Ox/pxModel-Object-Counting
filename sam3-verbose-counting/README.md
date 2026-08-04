@@ -83,6 +83,7 @@ Useful options:
 --device cuda         Inference device
 --no-amp              Disable CUDA mixed precision
 --show                Display visualizations
+--brand NAME=PROMPT   Localize one brand; repeat for each brand
 --filter-prompt P     Exclude targets overlapping a second detection (e.g. "faces of people")
 --no-filter-center    Don't drop a target whose center is inside a filter box
 --filter-iou 0.3      Also drop targets whose IoU with a filter box reaches 0.3
@@ -129,6 +130,37 @@ when it contains at least two smaller detections. The result keeps
 `redundant_box_count`, so brand-level localization can be inspected against
 the original model output. Tune the thresholds with the `--box-*` options or
 disable this behavior with `--no-box-cleanup`.
+
+### Per-brand localization
+
+Use one `--brand NAME=PROMPT` option per brand. The image backbone is encoded
+once and reused for all brand prompts. The output JSON contains a `brands`
+mapping with separate `count`, `boxes`, `scores`, and cleanup/filter audit
+fields for every label; the annotated JPG uses a different color for each
+brand.
+
+```bash
+uv run python infer.py image.jpg \
+  --brand "Ray-Ban=Ray-Ban sunglasses displayed on the retail rack" \
+  --brand "Oakley=Oakley sunglasses displayed on the retail rack"
+```
+
+The same API is available from Python:
+
+```python
+from infer import build_counter
+
+counter = build_counter(threshold=0.5)
+result = counter.infer_brands(
+    image_path,
+    {
+        "Ray-Ban": "Ray-Ban sunglasses displayed on the retail rack",
+        "Oakley": "Oakley sunglasses displayed on the retail rack",
+    },
+)
+print(result["total_count"])
+print(result["brands"]["Ray-Ban"]["boxes"])
+```
 
 Each image produces a JSON file and annotated JPG containing:
 
