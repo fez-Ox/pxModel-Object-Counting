@@ -1,11 +1,23 @@
 #!/usr/bin/env python3
 """Count objects in images with native SAM3 and verbose text prompts.
 
-Examples:
+CLI examples:
   uv run python infer.py image.jpg "all pairs of black sunglasses displayed on the retail rack"
   uv run python infer.py images/ "all pairs of black sunglasses displayed on the retail rack"
   uv run python infer.py images/ "all pairs of black sunglasses displayed on the retail rack" --recursive
   uv run python infer.py https://example.com/image.jpg "the red cars parked beside the building"
+
+Notebook / library usage (run from a project root that has `sam3-verbose-counting/`
+on ``sys.path``, with the ``sam3.pt`` checkpoint downloaded):
+
+    from infer import build_counter, annotate
+
+    counter = build_counter(threshold=0.5)          # loads sam3.pt on cuda (or cpu)
+    result = counter.infer("image.jpg", "the red cars parked beside the building")
+    annotated = annotate("image.jpg", "the red cars parked beside the building",
+                         result["boxes"], result["scores"])
+    print(result["count"])
+    annotated.save("annotated.jpg")
 """
 
 from __future__ import annotations
@@ -26,6 +38,24 @@ APP_ROOT = Path(__file__).resolve().parent
 DEFAULT_CHECKPOINT = APP_ROOT / "checkpoints" / "sam3.pt"
 DEFAULT_OUTPUT = APP_ROOT / "outputs" / "sam3_verbose_counting"
 IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".bmp", ".gif", ".webp", ".tif", ".tiff"}
+
+__all__ = [
+    "Sam3VerboseCounter",
+    "build_counter",
+    "annotate",
+    "resolve_checkpoint",
+    "cuda_available",
+    "image_path_to_pil",
+    "DEFAULT_CHECKPOINT",
+    "DEFAULT_OUTPUT",
+]
+
+
+def cuda_available() -> bool:
+    """Return True when a CUDA-capable device is available to torch."""
+    import torch
+
+    return torch.cuda.is_available()
 
 
 def _is_url(value: str) -> bool:
@@ -91,7 +121,10 @@ def _slugify(value: str) -> str:
     return (safe.strip("_") or "image")[:160]
 
 
-def _resolve_checkpoint(value: str) -> Path:
+def resolve_checkpoint(value: str | None = None) -> Path:
+    """Resolve a checkpoint path relative to this app, verifying it exists."""
+    if value is None:
+        value = str(DEFAULT_CHECKPOINT)
     checkpoint = Path(value).expanduser()
     if not checkpoint.is_absolute():
         checkpoint = APP_ROOT / checkpoint
@@ -113,7 +146,7 @@ def _next_output_path(output_dir: Path, stem: str, suffix: str) -> Path:
     return candidate
 
 
-def _draw_result(image_path: Path, prompt: str, boxes: list[list[float]], scores: list[float]):
+def annotate(image_path: Path, prompt: str, boxes: list[list[float]], scores: list[float]):
     from PIL import Image, ImageDraw, ImageFont
 
     image = Image.open(image_path).convert("RGB")
@@ -215,6 +248,43 @@ class Sam3VerboseCounter:
         }
 
 
+def build_counter(
+    *,
+    checkpoint: str | Path | None = None,
+    device: str | None = None,
+    threshold: float = 0.5,
+    amp: bool = True,
+) -> Sam3VerboseCounter:
+    """Build a persistent SAM3 counter, resolved for the current environment.
+
+    Args:
+        checkpoint: Path to ``sam3.pt``. Defaults to ``checkpoints/sam3.pt``.
+        device: Torch device string. Defaults to ``cuda`` when available, else ``cpu``.
+        threshold: Detection confidence threshold in ``[0, 1]``.
+        amp: Enable CUDA automatic mixed precision (ignored on CPU).
+
+    Raises:
+        FileNotFoundError: If the checkpoint does not exist.
+        RuntimeError: If a CUDA device is requested but unavailable.
+
+    Returns:
+        A ready-to-use :class:`Sam3VerboseCounter`.
+    """
+    resolved = resolve_checkpoint(str(checkpoint) if checkpoint is not None else None)
+    if device is None:
+        device = "cuda" if cuda_available() else "cpu"
+    if device.startswith("cuda") and not cuda_available():
+        raise RuntimeError(f"CUDA device requested but CUDA is unavailable: {device}")
+    if not 0.0 <= threshold <= 1.0:
+        raise ValueError("--threshold must be between 0 and 1")
+    return Sam3VerboseCounter(
+        checkpoint=resolved,
+        device=device,
+        threshold=threshold,
+        amp=amp,
+    )
+
+
 def image_path_to_pil(path: Path):
     from PIL import Image
 
@@ -284,7 +354,7 @@ def main() -> None:
     args = parser.parse_args()
 
     try:
-        checkpoint = _resolve_checkpoint(args.checkpoint)
+        checkpoint = resolve_checkpoint(args.checkpoint)
     except FileNotFoundError as exc:
         parser.error(str(exc))
 
@@ -292,21 +362,15 @@ def main() -> None:
     if not image_inputs:
         parser.error("no images to process")
 
-    import torch
-
-    device = args.device or ("cuda" if torch.cuda.is_available() else "cpu")
-    if device.startswith("cuda") and not torch.cuda.is_available():
-        parser.error(f"CUDA device requested but CUDA is unavailable: {device}")
-    if not 0.0 <= args.threshold <= 1.0:
-        parser.error("--threshold must be between 0 and 1")
-
     try:
-        counter = Sam3VerboseCounter(
+        counter = build_counter(
             checkpoint=checkpoint,
-            device=device,
+            device=args.device,
             threshold=args.threshold,
             amp=not args.no_amp,
         )
+    except (RuntimeError, ValueError) as exc:
+        parser.error(str(exc))
     except Exception as exc:
         parser.error(f"could not initialize SAM3: {exc}")
 
@@ -348,7 +412,7 @@ def main() -> None:
             import json
 
             json_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
-            visualization = _draw_result(
+            visualization = annotate(
                 image_path,
                 args.prompt,
                 result["boxes"],
