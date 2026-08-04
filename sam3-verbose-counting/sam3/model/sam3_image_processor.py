@@ -58,7 +58,12 @@ class Sam3Processor:
 
         state["original_height"] = height
         state["original_width"] = width
-        state["backbone_out"] = self.model.backbone.forward_image(image)
+        backbone_out = self.model.backbone.forward_image(image)
+        # The counting/PDC path uses the preprocessed image batch to derive
+        # its image size and dense reference features. Keep it alongside the
+        # regular backbone features produced by forward_image().
+        backbone_out.setdefault("img_batch_all_stages", image)
+        state["backbone_out"] = backbone_out
         inst_interactivity_en = self.model.inst_interactive_predictor is not None
         if inst_interactivity_en and "sam2_backbone_out" in state["backbone_out"]:
             sam2_backbone_out = state["backbone_out"]["sam2_backbone_out"]
@@ -95,7 +100,9 @@ class Sam3Processor:
             for image in images
         ]
         images = torch.stack(images, dim=0)
-        state["backbone_out"] = self.model.backbone.forward_image(images)
+        backbone_out = self.model.backbone.forward_image(images)
+        backbone_out.setdefault("img_batch_all_stages", images)
+        state["backbone_out"] = backbone_out
         inst_interactivity_en = self.model.inst_interactive_predictor is not None
         if inst_interactivity_en and "sam2_backbone_out" in state["backbone_out"]:
             sam2_backbone_out = state["backbone_out"]["sam2_backbone_out"]
