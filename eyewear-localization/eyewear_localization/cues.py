@@ -154,23 +154,82 @@ class SignageScopeCue:
         kind: str,
         median_width: float,
         median_height: float,
+        all_signs: list[Sign],
     ) -> list[Instance]:
         sx, sy, sw, sh = sign.bbox
         scx, scy = _center(sign.bbox)
+        if kind == "bay_header":
+            below = [
+                instance
+                for instance in instances
+                if (instance.centroid or _center(instance.bbox))[1]
+                >= sy + sh - median_height * 0.25
+            ]
+            if not below:
+                return []
+
+            # If several signs share a header band, use their midpoints as
+            # inferred bay boundaries. This handles narrow OCR boxes above a
+            # wide column without assigning the neighboring bay.
+            sibling_centers = sorted(
+                _center(other.bbox)[0]
+                for other in all_signs
+                if other.sign_id != sign.sign_id
+                and abs(_center(other.bbox)[1] - scy) <= max(2.0 * median_height, 20.0)
+            )
+            if sibling_centers:
+                left_boundary = max(
+                    (center + scx) / 2.0 for center in sibling_centers if center < scx
+                ) if any(center < scx for center in sibling_centers) else float("-inf")
+                right_boundary = min(
+                    (center + scx) / 2.0 for center in sibling_centers if center > scx
+                ) if any(center > scx for center in sibling_centers) else float("inf")
+                bounded = [
+                    instance
+                    for instance in below
+                    if left_boundary <= (instance.centroid or _center(instance.bbox))[0] <= right_boundary
+                ]
+                if bounded:
+                    return bounded
+
+            # With one header (or an empty inferred bay), select the nearest
+            # horizontal display group. The gap threshold is learned from
+            # detected object width rather than assuming a fixed number of
+            # columns or rows.
+            ordered = sorted(below, key=lambda item: (item.centroid or _center(item.bbox))[0])
+            groups: list[list[Instance]] = [[]]
+            max_gap = max(5.0 * median_width, 2.0 * sw, 1.0)
+            for item in ordered:
+                center_x = (item.centroid or _center(item.bbox))[0]
+                if groups[-1]:
+                    previous_x = (groups[-1][-1].centroid or _center(groups[-1][-1].bbox))[0]
+                    if center_x - previous_x > max_gap:
+                        groups.append([])
+                groups[-1].append(item)
+            return min(
+                groups,
+                key=lambda group: min(
+                    abs((item.centroid or _center(item.bbox))[0] - scx) for item in group
+                ),
+            )
+
         output: list[Instance] = []
         for instance in instances:
             ix, iy, iw, ih = instance.bbox
             icx, icy = instance.centroid or _center(instance.bbox)
             horizontal_distance = abs(icx - scx)
             x_overlap = max(0.0, min(sx + sw, ix + iw) - max(sx, ix))
-            if kind == "bay_header":
-                below = icy >= sy + sh - median_height * 0.25
-                aligned = x_overlap > 0 or horizontal_distance <= max(2.0 * median_width, sw)
-                if below and aligned:
-                    output.append(instance)
-            elif kind == "row_label":
+            if kind == "row_label":
                 same_row = abs(icy - scy) <= max(1.5 * median_height, sh * 2.0)
-                near_end = horizontal_distance <= max(4.0 * median_width, sw * 3.0)
+                row_items = [
+                    other for other in instances
+                    if abs((other.centroid or _center(other.bbox))[1] - scy)
+                    <= max(1.5 * median_height, sh * 2.0)
+                ]
+                row_left = min((other.bbox[0] for other in row_items), default=ix)
+                row_right = max((other.bbox[0] + other.bbox[2] for other in row_items), default=ix + iw)
+                sign_is_row_end = sx >= row_right or sx + sw <= row_left
+                near_end = sign_is_row_end or horizontal_distance <= max(4.0 * median_width, sw * 3.0)
                 if same_row and near_end:
                     output.append(instance)
             elif kind == "shelf_edge_tag":
@@ -238,6 +297,7 @@ class SignageScopeCue:
                     kind=kind,
                     median_width=median_width,
                     median_height=median_height,
+                    all_signs=signs,
                 )
                 score = self._hypothesis_score(kind, sign, items, median_height)
                 if score > best_score:

@@ -262,6 +262,32 @@ class AttributionOutput:
 
 
 @dataclass
+class InstanceExclusion:
+    """An L0 instance removed before attribution, retained for auditability."""
+
+    instance_id: str
+    bbox: list[float]
+    reasons: list[str]
+    support: dict[str, Any] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        if not self.instance_id:
+            raise ValueError("excluded instance_id must not be empty")
+        self.bbox = _bbox_xywh(self.bbox)
+        self.reasons = [str(reason) for reason in self.reasons if str(reason)]
+        if not self.reasons:
+            raise ValueError("an exclusion must have at least one reason")
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "instance_id": self.instance_id,
+            "bbox": list(self.bbox),
+            "reasons": list(self.reasons),
+            "support": self.support,
+        }
+
+
+@dataclass
 class PerceptionResult:
     """The complete JSON boundary emitted by L0."""
 
@@ -269,10 +295,12 @@ class PerceptionResult:
     signs: list[Sign]
     poster_regions: list[PosterRegion]
     text_detections: list[TextDetection] = field(default_factory=list)
+    excluded_instances: list[InstanceExclusion] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         return {
             "instances": [item.to_dict() for item in self.instances],
+            "excluded_instances": [item.to_dict() for item in self.excluded_instances],
             "signs": [item.to_dict() for item in self.signs],
             "poster_regions": [item.to_dict() for item in self.poster_regions],
             "text_detections": [item.to_dict() for item in self.text_detections],

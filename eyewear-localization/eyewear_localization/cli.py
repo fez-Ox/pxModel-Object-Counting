@@ -19,6 +19,7 @@ from eyewear_localization.perception import (
     build_ocr_backend,
 )
 from eyewear_localization.pipeline import LocalizationPipeline
+from eyewear_localization.scene_filter import build_scene_filter
 from eyewear_localization.visualization import annotate
 
 APP_ROOT = Path(__file__).resolve().parents[1]
@@ -43,6 +44,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--sam3-checkpoint", help="Optional native SAM3 checkpoint")
     parser.add_argument("--device", default=None, help="SAM3 device, when enabled")
     parser.add_argument("--sam3-threshold", type=float, default=0.25)
+    parser.add_argument(
+        "--shelf-filter",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Filter detections outside detected retail shelves when shelf boxes exist",
+    )
     parser.add_argument("--recursive", "-r", action="store_true")
     parser.add_argument("--out", "-o", default=str(APP_ROOT / "outputs"))
     parser.add_argument("--download-timeout", type=int, default=30)
@@ -79,7 +86,8 @@ def main(argv: list[str] | None = None) -> int:
         localizer=localizer,
         ocr=ocr,
         gazetteer=Gazetteer(config.gazetteer),
-        poster_detector=NullPosterBackend("poster detector not configured"),
+        poster_detector=NullPosterBackend("poster regions supplied by scene filter"),
+        scene_filter=build_scene_filter(localizer, require_shelf=args.shelf_filter),
     )
     if args.no_vlm_audit:
         config.use_vlm_audit = False

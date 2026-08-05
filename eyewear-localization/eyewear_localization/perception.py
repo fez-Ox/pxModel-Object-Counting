@@ -16,6 +16,7 @@ from typing import Any, Callable, Iterable, Mapping, Protocol
 from eyewear_localization.gazetteer import Gazetteer
 from eyewear_localization.schemas import (
     Instance,
+    InstanceExclusion,
     PerceptionResult,
     PosterRegion,
     Scope,
@@ -239,21 +240,36 @@ class SAM3Localizer:
         union = left_area + right_area - intersection
         return intersection / union if union else 0.0
 
-    def detect(self, image_path: Path) -> list[LocalizationDetection]:
-        candidates: list[LocalizationDetection] = []
-        for prompt in SAM3_CLASS_PROMPTS:
-            threshold = self.rimless_threshold if prompt == "rimless glasses" else self.score_threshold
-            for box, score, mask_rle in self._predictions(self.predictor(image_path, prompt)):
-                if len(box) != 4 or score < threshold:
-                    continue
-                candidates.append(LocalizationDetection(box, score, prompt, mask_rle))
-
+    def _deduplicate(self, candidates: list[LocalizationDetection]) -> list[LocalizationDetection]:
         kept: list[LocalizationDetection] = []
         for candidate in sorted(candidates, key=lambda item: item.score, reverse=True):
             if any(self._iou(candidate.box, previous.box) >= self.duplicate_iou for previous in kept):
                 continue
             kept.append(candidate)
         return kept
+
+    def detect_prompt(
+        self,
+        image_path: Path,
+        prompt: str,
+        *,
+        threshold: float | None = None,
+    ) -> list[LocalizationDetection]:
+        """Run one non-brand prompt through the injected SAM3 predictor."""
+        limit = self.score_threshold if threshold is None else float(threshold)
+        candidates = [
+            LocalizationDetection(box, score, prompt, mask_rle)
+            for box, score, mask_rle in self._predictions(self.predictor(image_path, prompt))
+            if len(box) == 4 and score >= limit
+        ]
+        return self._deduplicate(candidates)
+
+    def detect(self, image_path: Path) -> list[LocalizationDetection]:
+        candidates: list[LocalizationDetection] = []
+        for prompt in SAM3_CLASS_PROMPTS:
+            threshold = self.rimless_threshold if prompt == "rimless glasses" else self.score_threshold
+            candidates.extend(self.detect_prompt(image_path, prompt, threshold=threshold))
+        return self._deduplicate(candidates)
 
 
 def build_native_sam3_localizer(
@@ -337,11 +353,13 @@ class PerceptionFrontend:
         ocr: OCRBackend,
         gazetteer: Gazetteer,
         poster_detector: PosterBackend | None = None,
+        scene_filter: Any | None = None,
     ) -> None:
         self.localizer = localizer
         self.ocr = ocr
         self.gazetteer = gazetteer
         self.poster_detector = poster_detector or NullPosterBackend()
+        self.scene_filter = scene_filter
 
     def run(self, image_path: str | Path) -> PerceptionResult:
         image_path = Path(image_path)
@@ -375,4 +393,19 @@ class PerceptionFrontend:
             posters = self.poster_detector.detect(image_path)
         except Exception:
             posters = []
-        return PerceptionResult(instances, signs, posters, text_detections)
+
+        excluded_instances: list[InstanceExclusion] = []
+        if self.scene_filter is not None:
+            try:
+                instances, excluded_instances = self.scene_filter.filter(image_path, instances)
+            except Exception:
+                # Filtering is a conservative optional stage: a broken filter
+                # must not discard otherwise valid eyewear detections.
+                pass
+        return PerceptionResult(
+            instances,
+            signs,
+            posters,
+            text_detections,
+            excluded_instances,
+        )

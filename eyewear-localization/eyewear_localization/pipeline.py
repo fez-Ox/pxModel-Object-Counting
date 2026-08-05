@@ -105,6 +105,7 @@ class LocalizationPipeline:
             "schema_version": "1.0",
             "image": source or str(image_path),
             "instances": [item.to_dict() for item in perception.instances],
+            "excluded_instances": [item.to_dict() for item in perception.excluded_instances],
             "signs": [item.to_dict() for item in scoped_signs],
             "poster_regions": [item.to_dict() for item in perception.poster_regions],
             "text_detections": [item.to_dict() for item in perception.text_detections],

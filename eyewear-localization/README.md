@@ -57,14 +57,34 @@ The OCR stage detects all text independently. The configured gazetteer controls
 which strings become `signs[]`; raw OCR remains in `text_detections[]`. The JSON
 contains:
 
-- `instances[]`: class-agnostic eyewear detections.
-- `signs[]`: OCR strings matched to gazetteer brands, initially with scope `none`.
+- `instances[]`: class-agnostic eyewear detections kept for attribution.
+- `excluded_instances[]`: L0 detections filtered out by the scene filter (worn on a person, inside an advertisement, or not on a detected shelf) with their reasons.
+- `signs[]`: OCR strings matched to gazetteer brands, with their inferred scope.
 - `evidence[]`: C1/C2/C4 cue records, never final labels.
 - `outputs[]`: fused per-instance labels and probabilities, including `unknown`.
 
 A sign is not automatically assigned to nearby eyewear. C2 must first produce a
 scope hypothesis, and only then can it emit evidence for instances inside that
 region.
+
+## C2 bay/row grouping
+
+C2 attributes an entire inferred display group, not just detections that
+horizontally overlap the OCR box. When several signs share a header band, their
+midpoints are used as inferred bay boundaries (per-image, never a fixed grid);
+with a single header the nearest horizontal display group is selected using a
+gap threshold learned from detected object widths. Row-end labels attribute
+their whole row.
+
+## Scene filtering
+
+With a SAM3 checkpoint present, the pipeline additionally runs class-agnostic
+prompts (`people`/`person`/`faces of people`, `advertisements`/`posters`/
+`billboards`, `retail shelves`/`display shelves`/`shelf`). Detections whose
+center lies inside a person or advertisement region are removed, and when shelf
+regions were detected, detections outside them are removed too. Every removal
+is recorded in `excluded_instances[]` and drawn in red in the annotated image.
+Control with `--shelf-filter` / `--no-shelf-filter` (default: on).
 
 ## Notebook
 

@@ -39,4 +39,16 @@ def annotate(image_path: str | Path, result: dict[str, Any]):
         draw.rectangle(text_box, fill=(35, 110, 235, 210))
         draw.text((x, y + height), label, fill=(255, 255, 255, 255), font=font)
 
+    for excluded in result.get("excluded_instances", []):
+        x, y, width, height = excluded["bbox"]
+        draw.rectangle(
+            (x, y, x + width, y + height),
+            outline=(190, 60, 60, 230),
+            width=max(1, image.width // 700),
+        )
+        label = f'{excluded["instance_id"]}: {",".join(excluded.get("reasons", []))}'
+        text_box = draw.textbbox((x, y + height), label, font=font)
+        draw.rectangle(text_box, fill=(190, 60, 60, 200))
+        draw.text((x, y + height), label, fill=(255, 255, 255, 255), font=font)
+
     return image
