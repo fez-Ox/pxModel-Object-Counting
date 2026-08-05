@@ -43,3 +43,24 @@ class FusionTests(unittest.TestCase):
         }
         smoothed = smooth_continuity(probabilities, [self.instance, right], self.config)
         self.assertEqual(smoothed["inst_0001"], probabilities["inst_0001"])
+
+    def test_decision_debug_identifies_failed_gate(self):
+        evidence = [Evidence("inst_0001", "cartier", 0.55, "C2")]
+        probabilities = fuse_evidence([self.instance], evidence, self.config)
+        # force low confidence: clamp evidence confidence to 0.55
+        evidence[0].confidence = 0.55
+        probabilities = fuse_evidence([self.instance], evidence, self.config)
+        output = decide([self.instance], probabilities, evidence, self.config)[0]
+        self.assertTrue(output.abstained)
+        debug = output.decision_debug
+        self.assertIsNotNone(debug)
+        self.assertFalse(debug["gates"]["tau"])
+
+    def test_decision_debug_present_on_accept(self):
+        evidence = [Evidence("inst_0001", "cartier", 1.0, "C1")]
+        probabilities = fuse_evidence([self.instance], evidence, self.config)
+        output = decide([self.instance], probabilities, evidence, self.config)[0]
+        self.assertFalse(output.abstained)
+        self.assertTrue(output.decision_debug["gates"]["tau"])
+        self.assertTrue(output.decision_debug["gates"]["margin"])
+        self.assertTrue(output.decision_debug["gates"]["beats_unknown"])

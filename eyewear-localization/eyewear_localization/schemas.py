@@ -237,6 +237,7 @@ class AttributionOutput:
     abstained: bool
     probabilities: dict[str, float]
     evidence: list[Evidence] = field(default_factory=list)
+    decision_debug: dict[str, Any] | None = None
 
     def __post_init__(self) -> None:
         if not self.instance_id:
@@ -252,13 +253,16 @@ class AttributionOutput:
             raise ValueError("output probabilities must include unknown")
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        value: dict[str, Any] = {
             "instance_id": self.instance_id,
             "brand": self.brand,
             "abstained": bool(self.abstained),
             "probabilities": dict(self.probabilities),
             "evidence": [item.to_dict() for item in self.evidence],
         }
+        if self.decision_debug is not None:
+            value["decision_debug"] = self.decision_debug
+        return value
 
 
 @dataclass

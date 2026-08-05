@@ -150,18 +150,46 @@ def decide(
             reverse=True,
         )
         if not candidates:
-            outputs.append(AttributionOutput(instance.id, "unknown", True, values, grouped[instance.id]))
+            outputs.append(
+                AttributionOutput(
+                    instance.id,
+                    "unknown",
+                    True,
+                    values,
+                    grouped[instance.id],
+                    {"reason": "no_brand_candidates"},
+                )
+            )
             continue
         best_brand, best_probability = candidates[0]
         runner_up = max(
             [values.get("unknown", 0.0)]
             + [probability for _, probability in candidates[1:]]
         )
-        accepted = (
-            best_probability >= config.tau
-            and best_probability - runner_up >= config.margin
-            and best_probability > values.get("unknown", 0.0)
+        runner_label = (
+            "unknown"
+            if runner_up == values.get("unknown", 0.0)
+            else next(
+                (brand for brand, probability in candidates[1:] if probability == runner_up),
+                "unknown",
+            )
         )
+        gate_tau = best_probability >= config.tau
+        gate_margin = best_probability - runner_up >= config.margin
+        gate_unknown = best_probability > values.get("unknown", 0.0)
+        accepted = gate_tau and gate_margin and gate_unknown
+        decision_debug = {
+            "best_brand": best_brand,
+            "best_probability": best_probability,
+            "runner_up_label": runner_label,
+            "runner_up_probability": runner_up,
+            "gates": {
+                "tau": gate_tau,
+                "margin": gate_margin,
+                "beats_unknown": gate_unknown,
+                "thresholds": {"tau": config.tau, "margin": config.margin},
+            },
+        }
         outputs.append(
             AttributionOutput(
                 instance.id,
@@ -169,6 +197,7 @@ def decide(
                 not accepted,
                 values,
                 grouped[instance.id],
+                decision_debug,
             )
         )
     return outputs

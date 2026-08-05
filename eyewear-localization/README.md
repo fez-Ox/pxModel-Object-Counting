@@ -92,6 +92,34 @@ A simple Kaggle-ready walkthrough is at `../eyewear_localization_kaggle.ipynb`.
 It runs OCR without SAM3 first, then optionally runs full attribution when an
 approved `sam3.pt` is attached as a Kaggle dataset.
 
+## Diagnosis (offline, no model downloads)
+
+Every run already writes a JSON file per image. Two things make abstentions
+explainable without re-running the model:
+
+1. **`outputs[].decision_debug`** — added to each decision. It records the
+   winning brand and its probability, the runner-up, and which acceptance
+   gates failed (`tau`, `margin`, `beats_unknown`) with their thresholds.
+2. **`diagnose.py`** — a pure-standard-library audit. Point it at any result
+   JSON and it prints, per instance, the evidence chain, the gate breakdown,
+   and a summary of the two most common abstention causes (no evidence reached
+   the instance, or evidence was too weak to pass the tau gate):
+
+```bash
+python diagnose.py outputs/image.json
+python diagnose.py < outputs/image.json
+```
+
+The same five questions `diagnose.py` answers, asked directly in the JSON:
+
+1. `excluded_instances[]` — removed by the scene filter (try `--no-shelf-filter`).
+2. `instances[]` — present at all? If not, the localizer missed them.
+3. `signs[]` — was the brand text found by OCR at all?
+4. `signs[].scope` — did C2 assign a region, and does it cover the instance?
+5. `outputs[].decision_debug.gates` — if a brand probability sits near 0.5–0.6,
+   the evidence exists and is correct but fails the acceptance gate; lower
+   `fusion.tau` / `fusion.margin` in `config.yaml`.
+
 ## Tests
 
 ```bash

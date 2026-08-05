@@ -327,6 +327,7 @@ class SignageScopeCue:
                             "sign_id": sign.sign_id,
                             "sign_text": sign.text,
                             "sign_bbox": list(sign.bbox),
+                            "sign_confidence": sign.confidence,
                             "scope": scope.to_dict(),
                         },
                     )
