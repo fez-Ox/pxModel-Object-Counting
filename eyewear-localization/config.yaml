@@ -1,0 +1,39 @@
+# Brand vocabulary is configuration, not a prompt to SAM3.
+gazetteer:
+  - ray-ban
+  - oakley
+  - gucci
+  - prada
+  - chanel
+  - versace
+  - dior
+  - armani
+  - giorgio armani
+  - persol
+  - tom ford
+  - burberry
+  - cartier
+  - moncler
+  - michael kors
+  - dolce & gabbana
+  - tiffany & co
+
+cue_reliability:
+  C1: 0.95
+  C2: 0.85
+  C4: 0.35
+  L3: 0.70
+
+fusion:
+  temperature: 0.6
+  unknown_prior: 0.35
+  tau: 0.6
+  margin: 0.15
+
+smoothing:
+  lambda: 0.25
+  gate_punknown: 0.5
+
+cascade:
+  use_vlm_audit: true
+  uncertainty_band: [0.45, 0.70]

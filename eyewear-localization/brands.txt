@@ -1,0 +1,17 @@
+# Add or remove brands for the target catalog.
+ray-ban
+oakley
+gucci
+prada
+chanel
+versace
+dior
+armani
+persol
+tom ford
+burberry
+cartier
+moncler
+michael kors
+dolce & gabbana
+tiffany & co
