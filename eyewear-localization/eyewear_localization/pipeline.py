@@ -91,6 +91,16 @@ class LocalizationPipeline:
                 )
                 outputs = decide(perception.instances, probabilities, evidence, self.config)
 
+        def backend_info(backend: Any) -> dict[str, Any]:
+            info = {
+                "name": backend.name,
+                "reliability": backend.reliability,
+            }
+            reason = getattr(backend, "reason", None)
+            if reason:
+                info["reason"] = str(reason)
+            return info
+
         result: dict[str, Any] = {
             "schema_version": "1.0",
             "image": source or str(image_path),
@@ -101,18 +111,9 @@ class LocalizationPipeline:
             "evidence": [item.to_dict() for item in evidence],
             "outputs": [item.to_dict() for item in outputs],
             "backends": {
-                "localizer": {
-                    "name": self.frontend.localizer.name,
-                    "reliability": self.frontend.localizer.reliability,
-                },
-                "ocr": {
-                    "name": self.frontend.ocr.name,
-                    "reliability": self.frontend.ocr.reliability,
-                },
-                "poster_detector": {
-                    "name": self.frontend.poster_detector.name,
-                    "reliability": self.frontend.poster_detector.reliability,
-                },
+                "localizer": backend_info(self.frontend.localizer),
+                "ocr": backend_info(self.frontend.ocr),
+                "poster_detector": backend_info(self.frontend.poster_detector),
             },
         }
         return result

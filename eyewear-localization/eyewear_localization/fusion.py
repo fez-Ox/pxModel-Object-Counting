@@ -28,8 +28,6 @@ def fuse_evidence(
 ) -> dict[str, dict[str, float]]:
     """Apply the default reliability-weighted fusion equation."""
     instances = list(instances)
-    known_brands = set(config.gazetteer)
-    known_brands.update(item.brand for item in evidence)
     grouped: dict[str, list[Evidence]] = defaultdict(list)
     valid_ids = {instance.id for instance in instances}
     for item in evidence:
@@ -38,8 +36,12 @@ def fuse_evidence(
 
     probabilities: dict[str, dict[str, float]] = {}
     for instance in instances:
-        scores = {brand: 0.0 for brand in sorted(known_brands)}
-        scores["unknown"] = config.unknown_prior
+        # The gazetteer is a matching vocabulary, not a set of active
+        # hypotheses for every object. Including every zero-evidence brand
+        # here would dilute a valid cue as the catalog grows. Each instance
+        # competes only among brands supported by its own evidence and the
+        # explicit unknown alternative.
+        scores: dict[str, float] = {"unknown": config.unknown_prior}
         for item in grouped[instance.id]:
             scores[item.brand] = scores.get(item.brand, 0.0) + (
                 config.cue_reliability.get(item.cue, 0.0) * item.confidence

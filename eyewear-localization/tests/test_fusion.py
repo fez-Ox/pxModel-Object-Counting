@@ -15,7 +15,7 @@ class FusionTests(unittest.TestCase):
         output = decide([self.instance], probabilities, [], self.config)[0]
         self.assertEqual(output.brand, "unknown")
         self.assertTrue(output.abstained)
-        self.assertGreater(output.probabilities["unknown"], output.probabilities["cartier"])
+        self.assertEqual(output.probabilities, {"unknown": 1.0})
 
     def test_strong_cue_is_accepted(self):
         evidence = [Evidence("inst_0001", "cartier", 1.0, "C1")]
@@ -23,6 +23,17 @@ class FusionTests(unittest.TestCase):
         output = decide([self.instance], probabilities, evidence, self.config)[0]
         self.assertEqual(output.brand, "cartier")
         self.assertFalse(output.abstained)
+
+    def test_zero_evidence_catalog_entries_do_not_dilute_instance_cue(self):
+        config = LocalizationConfig(
+            gazetteer=["cartier"] + [f"brand-{index}" for index in range(20)],
+            use_vlm_audit=False,
+        )
+        evidence = [Evidence("inst_0001", "cartier", 1.0, "C1")]
+        probabilities = fuse_evidence([self.instance], evidence, config)
+        output = decide([self.instance], probabilities, evidence, config)[0]
+        self.assertEqual(output.brand, "cartier")
+        self.assertGreater(output.probabilities["cartier"], 0.6)
 
     def test_smoothing_does_not_propagate_from_uncertain_neighbor(self):
         right = Instance("inst_0002", [40, 10, 20, 20])
