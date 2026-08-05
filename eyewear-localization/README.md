@@ -62,6 +62,12 @@ A sign is not automatically assigned to nearby eyewear. C2 must first produce a
 scope hypothesis, and only then can it emit evidence for instances inside that
 region.
 
+## Notebook
+
+A simple Kaggle-ready walkthrough is at `../eyewear_localization_kaggle.ipynb`.
+It runs OCR without SAM3 first, then optionally runs full attribution when an
+approved `sam3.pt` is attached as a Kaggle dataset.
+
 ## Tests
 
 ```bash
