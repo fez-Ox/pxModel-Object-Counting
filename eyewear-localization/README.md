@@ -27,12 +27,16 @@ explicit next milestones.
 
 ```bash
 cd eyewear-localization
-uv sync --extra ocr
+uv sync --extra ocr --extra sam3
 ```
 
-EasyOCR downloads its own recognition models on first use. No SAM3 checkpoint
-is needed to exercise the OCR-only parts. To enable class-agnostic localization,
-provide the existing native SAM3 checkpoint explicitly:
+EasyOCR downloads its own recognition models on first use. The `sam3` extra
+installs the native runtime dependencies. The companion Kaggle notebook
+`../eyewear_localization_kaggle.ipynb` retrieves the gated SAM3 checkpoint
+through the direct HTTP downloader using the `HF_TOKEN` Kaggle Secret.
+
+To enable class-agnostic localization locally, download or provide the native
+SAM3 checkpoint explicitly:
 
 ```bash
 uv run python infer.py /path/to/image.jpg \
