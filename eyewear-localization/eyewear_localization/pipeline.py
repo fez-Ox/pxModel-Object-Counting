@@ -47,15 +47,27 @@ class LocalizationPipeline:
         image_path = Path(image_path)
         perception = self.frontend.run(image_path)
 
+        # Get image dimensions for C2 column-boundary inference.
+        image_width: float | None = None
+        try:
+            from PIL import Image
+
+            with Image.open(image_path) as _img:
+                image_width = float(_img.width)
+        except Exception:
+            pass
+
         c1_evidence = self._safe(
             self.c1.emit, [], image_path, perception.instances
         )
         scoped_signs, c2_evidence = self._safe(
-            self.c2.associate,
+            lambda: self.c2.associate(
+                perception.instances,
+                perception.signs,
+                perception.poster_regions,
+                image_width=image_width,
+            ),
             (perception.signs, []),
-            perception.instances,
-            perception.signs,
-            perception.poster_regions,
         )
         c4_evidence = self._safe(
             self.c4.emit, [], image_path, perception.instances

@@ -19,6 +19,7 @@ class LocalizationConfig:
     unknown_prior: float = 0.35
     tau: float = 0.6
     margin: float = 0.15
+    max_per_evidence: float | None = 0.5
     smoothing_lambda: float = 0.25
     smoothing_gate_punknown: float = 0.5
     use_vlm_audit: bool = True
@@ -35,6 +36,8 @@ class LocalizationConfig:
         self.unknown_prior = _nonnegative(self.unknown_prior, "unknown_prior")
         self.tau = _probability(self.tau, "tau")
         self.margin = _probability(self.margin, "margin")
+        if self.max_per_evidence is not None:
+            self.max_per_evidence = _nonnegative(self.max_per_evidence, "max_per_evidence")
         self.smoothing_lambda = _probability(self.smoothing_lambda, "smoothing_lambda")
         self.smoothing_gate_punknown = _probability(
             self.smoothing_gate_punknown, "smoothing_gate_punknown"
@@ -55,6 +58,7 @@ class LocalizationConfig:
                 "unknown_prior": self.unknown_prior,
                 "tau": self.tau,
                 "margin": self.margin,
+                "max_per_evidence": self.max_per_evidence,
             },
             "smoothing": {
                 "lambda": self.smoothing_lambda,
@@ -128,6 +132,7 @@ def config_from_mapping(raw: Mapping[str, Any]) -> LocalizationConfig:
         unknown_prior=float(fusion.get("unknown_prior", 0.35)),
         tau=float(fusion.get("tau", 0.6)),
         margin=float(fusion.get("margin", 0.15)),
+        max_per_evidence=None if fusion.get("max_per_evidence", 0.5) in (None, "none") else float(fusion.get("max_per_evidence", 0.5)),
         smoothing_lambda=float(smoothing.get("lambda", 0.25)),
         smoothing_gate_punknown=float(smoothing.get("gate_punknown", 0.5)),
         use_vlm_audit=bool(cascade.get("use_vlm_audit", True)),

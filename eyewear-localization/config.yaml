@@ -20,15 +20,16 @@ gazetteer:
 
 cue_reliability:
   C1: 0.7
-  C2: 0.7
+  C2: 0.55
   C4: 0.35
   L3: 0.70
 
 fusion:
   temperature: 0.6
-  unknown_prior: 0.35
-  tau: 0.4
+  unknown_prior: 0.40
+  tau: 0.50
   margin: 0.15
+  max_per_evidence: 0.5
 
 smoothing:
   lambda: 0.25

@@ -43,9 +43,10 @@ def fuse_evidence(
         # explicit unknown alternative.
         scores: dict[str, float] = {"unknown": config.unknown_prior}
         for item in grouped[instance.id]:
-            scores[item.brand] = scores.get(item.brand, 0.0) + (
-                config.cue_reliability.get(item.cue, 0.0) * item.confidence
-            )
+            contribution = config.cue_reliability.get(item.cue, 0.0) * item.confidence
+            if config.max_per_evidence is not None:
+                contribution = min(contribution, config.max_per_evidence)
+            scores[item.brand] = scores.get(item.brand, 0.0) + contribution
         probabilities[instance.id] = _softmax(scores, config.temperature)
     return probabilities
 

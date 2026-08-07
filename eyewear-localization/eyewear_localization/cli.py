@@ -10,7 +10,7 @@ import sys
 from typing import Any, Mapping
 
 from eyewear_localization.config import load_config
-from eyewear_localization.cues import StylePriorCue
+from eyewear_localization.cues import OnProductBrandingCue, StylePriorCue
 from eyewear_localization.gazetteer import Gazetteer, normalize_text
 from eyewear_localization.io import materialize_inputs, write_json
 from eyewear_localization.perception import (
@@ -66,6 +66,7 @@ def set_overrides_from_args(args: argparse.Namespace) -> dict[str, Any]:
     for key, value in (
         ("fusion.tau", args.tau),
         ("fusion.margin", args.margin),
+        ("fusion.max_per_evidence", args.max_per_evidence),
         ("fusion.temperature", args.temperature),
         ("fusion.unknown_prior", args.unknown_prior),
         ("smoothing.lambda", args.smooth_lambda),
@@ -95,7 +96,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--brand", action="append", default=[], help="Add one gazetteer brand; repeatable")
     parser.add_argument("--brand-file", help="Text file containing one gazetteer brand per line")
     parser.add_argument("--ocr-backend", default="easyocr", choices=("easyocr", "none"))
-    parser.add_argument("--ocr-scale", type=float, default=2.0, help="OCR upscale factor")
+    parser.add_argument("--ocr-scale", type=float, default=2.0, help="OCR upscale factor (whole-image)")
+    parser.add_argument("--c1-margin", type=float, default=None, help="C1 crop margin fraction (default 0.25)")
+    parser.add_argument("--c1-scales", default=None, help="C1 multi-scale OCR factors, comma-separated (default '2.0,4.0')")
+    parser.add_argument("--c1-no-sharpen", action="store_true", help="Disable post-upscale sharpening in C1")
     parser.add_argument("--sam3-checkpoint", help="Optional native SAM3 checkpoint")
     parser.add_argument("--device", default=None, help="SAM3 device, when enabled")
     parser.add_argument("--sam3-threshold", type=float, default=0.25)
@@ -115,6 +119,7 @@ def build_parser() -> argparse.ArgumentParser:
     for flag, _key, kind in (
         ("--tau", "fusion.tau", float),
         ("--margin", "fusion.margin", float),
+        ("--max-per-evidence", "fusion.max_per_evidence", float),
         ("--temperature", "fusion.temperature", float),
         ("--unknown-prior", "fusion.unknown_prior", float),
         ("--smooth-lambda", "smoothing.lambda", float),
@@ -184,7 +189,16 @@ def main(argv: list[str] | None = None) -> int:
     )
     if args.no_vlm_audit:
         config.use_vlm_audit = False
-    pipeline = LocalizationPipeline(frontend, config=config, c4=StylePriorCue())
+    # Build C1 with optional tuning parameters.
+    c1_kwargs: dict[str, Any] = {}
+    if args.c1_margin is not None:
+        c1_kwargs["margin"] = args.c1_margin
+    if args.c1_scales is not None:
+        c1_kwargs["scales"] = tuple(float(s) for s in args.c1_scales.split(","))
+    if args.c1_no_sharpen:
+        c1_kwargs["sharpen"] = False
+    c1 = OnProductBrandingCue(ocr, Gazetteer(config.gazetteer), **c1_kwargs)
+    pipeline = LocalizationPipeline(frontend, config=config, c1=c1, c4=StylePriorCue())
     output_dir = Path(args.out)
     output_dir.mkdir(parents=True, exist_ok=True)
 
