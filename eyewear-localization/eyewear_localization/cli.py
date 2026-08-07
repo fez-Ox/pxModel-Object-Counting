@@ -63,18 +63,19 @@ def set_overrides_from_args(args: argparse.Namespace) -> dict[str, Any]:
         assign(dotted.strip(), _parse_value(raw))
 
     # Convenience sugar flags → dotted keys
-    for key, value in (
-        ("fusion.tau", args.tau),
-        ("fusion.margin", args.margin),
-        ("fusion.max_per_evidence", args.max_per_evidence),
-        ("fusion.temperature", args.temperature),
-        ("fusion.unknown_prior", args.unknown_prior),
-        ("smoothing.lambda", args.smooth_lambda),
-        ("smoothing.gate_punknown", args.smooth_gate),
-        ("scene.person_threshold", args.person_threshold),
-        ("scene.poster_threshold", args.poster_threshold),
-        ("scene.shelf_threshold", args.shelf_threshold),
+    for key, attr in (
+        ("fusion.tau", "tau"),
+        ("fusion.margin", "margin"),
+        ("fusion.max_per_evidence", "max_per_evidence"),
+        ("fusion.temperature", "temperature"),
+        ("fusion.unknown_prior", "unknown_prior"),
+        ("smoothing.lambda", "smooth_lambda"),
+        ("smoothing.gate_punknown", "smooth_gate"),
+        ("scene.person_threshold", "person_threshold"),
+        ("scene.poster_threshold", "poster_threshold"),
+        ("scene.shelf_threshold", "shelf_threshold"),
     ):
+        value = getattr(args, attr, None)
         if value is not None:
             assign(key, value)
 
@@ -95,7 +96,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--config", default=str(DEFAULT_CONFIG), help="YAML configuration")
     parser.add_argument("--brand", action="append", default=[], help="Add one gazetteer brand; repeatable")
     parser.add_argument("--brand-file", help="Text file containing one gazetteer brand per line")
-    parser.add_argument("--ocr-backend", default="easyocr", choices=("easyocr", "none"))
+    parser.add_argument("--ocr-backend", default="easyocr", choices=("easyocr", "florence2", "none"))
     parser.add_argument("--ocr-scale", type=float, default=2.0, help="OCR upscale factor (whole-image)")
     parser.add_argument("--c1-margin", type=float, default=None, help="C1 crop margin fraction (default 0.25)")
     parser.add_argument("--c1-scales", default=None, help="C1 multi-scale OCR factors, comma-separated (default '2.0,4.0')")

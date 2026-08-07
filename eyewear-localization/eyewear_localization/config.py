@@ -19,11 +19,14 @@ class LocalizationConfig:
     unknown_prior: float = 0.35
     tau: float = 0.6
     margin: float = 0.15
-    max_per_evidence: float | None = 0.5
+    max_per_evidence: float | None = None
     smoothing_lambda: float = 0.25
     smoothing_gate_punknown: float = 0.5
     use_vlm_audit: bool = True
     uncertainty_band: tuple[float, float] = (0.45, 0.70)
+    cascade_t1: float = 0.80
+    cascade_t2: float = 0.70
+    cascade_t4: float = 0.85
 
     def __post_init__(self) -> None:
         self.gazetteer = sorted(
@@ -132,7 +135,7 @@ def config_from_mapping(raw: Mapping[str, Any]) -> LocalizationConfig:
         unknown_prior=float(fusion.get("unknown_prior", 0.35)),
         tau=float(fusion.get("tau", 0.6)),
         margin=float(fusion.get("margin", 0.15)),
-        max_per_evidence=None if fusion.get("max_per_evidence", 0.5) in (None, "none") else float(fusion.get("max_per_evidence", 0.5)),
+        max_per_evidence=None if fusion.get("max_per_evidence") in (None, "none") else float(fusion.get("max_per_evidence")),
         smoothing_lambda=float(smoothing.get("lambda", 0.25)),
         smoothing_gate_punknown=float(smoothing.get("gate_punknown", 0.5)),
         use_vlm_audit=bool(cascade.get("use_vlm_audit", True)),

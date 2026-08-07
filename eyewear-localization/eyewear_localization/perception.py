@@ -140,12 +140,140 @@ def build_ocr_backend(
 ) -> OCRBackend:
     if name == "none":
         return NullOCRBackend("disabled by configuration")
+    if name == "florence2":
+        try:
+            device = "cuda" if gpu is True or gpu == "cuda" else (gpu if isinstance(gpu, str) else None)
+            return Florence2OCRBackend(device=device, scale=scale)
+        except Exception as exc:
+            return NullOCRBackend(f"Florence2 unavailable: {exc}")
     if name != "easyocr":
         return NullOCRBackend(f"unknown OCR backend: {name}")
     try:
         return EasyOCRBackend(gpu=gpu, scale=scale)
     except Exception as exc:
         return NullOCRBackend(f"EasyOCR unavailable: {exc}")
+
+
+class Florence2OCRBackend:
+    """Florence-2 zero-shot OCR backend using HuggingFace transformers."""
+
+    name = "florence2"
+    reliability = 1.0
+
+    def __init__(
+        self,
+        *,
+        model_id: str = "microsoft/Florence-2-base",
+        device: str | None = None,
+        scale: float = 1.0,
+    ) -> None:
+        self.model_id = model_id
+        self.device = device
+        self.scale = max(1.0, float(scale))
+        self._processor = None
+        self._model = None
+
+    def _ensure_loaded(self) -> None:
+        if self._model is not None and self._processor is not None:
+            return
+        import torch
+        from transformers import AutoModelForCausalLM, AutoProcessor
+
+        device_str = self.device
+        if device_str is None:
+            device_str = "cuda" if torch.cuda.is_available() else "cpu"
+        torch_dtype = torch.float16 if "cuda" in device_str else torch.float32
+
+        self._processor = AutoProcessor.from_pretrained(self.model_id, trust_remote_code=True)
+        self._model = AutoModelForCausalLM.from_pretrained(
+            self.model_id,
+            torch_dtype=torch_dtype,
+            trust_remote_code=True,
+        ).to(device_str)
+        self.actual_device = device_str
+
+    @staticmethod
+    def _image(value: Any):
+        from PIL import Image
+
+        if isinstance(value, (str, Path)):
+            with Image.open(value) as image:
+                return image.convert("RGB")
+        if isinstance(value, Image.Image):
+            return value.convert("RGB")
+        return Image.fromarray(value).convert("RGB")
+
+    def detect(self, image: Any) -> list[TextDetection]:
+        try:
+            self._ensure_loaded()
+        except Exception:
+            return []
+
+        import torch
+        source = self._image(image)
+        width, height = source.size
+
+        prompt = "<OCR>"
+        inputs = self._processor(text=prompt, images=source, return_tensors="pt").to(self.actual_device)
+
+        with torch.no_grad():
+            generated_ids = self._model.generate(
+                input_ids=inputs["input_ids"],
+                pixel_values=inputs["pixel_values"],
+                max_new_tokens=1024,
+                num_beams=3,
+                do_sample=False,
+            )
+
+        generated_text = self._processor.batch_decode(generated_ids, skip_special_tokens=False)[0]
+        parsed_answer = self._processor.post_process_generation(
+            generated_text,
+            task="<OCR>",
+            image_size=(width, height),
+        )
+
+        ocr_data = parsed_answer.get("<OCR>", {})
+        labels = ocr_data.get("labels", [])
+        bboxes = ocr_data.get("bboxes", [])
+
+        output: list[TextDetection] = []
+
+        if bboxes and labels and len(bboxes) == len(labels):
+            for box, text in zip(bboxes, labels):
+                text_str = str(text).strip()
+                if not text_str:
+                    continue
+                x0, y0, x1, y1 = float(box[0]), float(box[1]), float(box[2]), float(box[3])
+                w, h = max(0.0, x1 - x0), max(0.0, y1 - y0)
+                try:
+                    output.append(
+                        TextDetection(
+                            text=text_str,
+                            bbox=[x0, y0, w, h],
+                            confidence=0.95,
+                            source=self.name,
+                        )
+                    )
+                except ValueError:
+                    continue
+
+        if not output and isinstance(ocr_data, str) and ocr_data.strip():
+            for line in ocr_data.splitlines():
+                line = line.strip()
+                if line:
+                    try:
+                        output.append(
+                            TextDetection(
+                                text=line,
+                                bbox=[0.0, 0.0, float(width), float(height)],
+                                confidence=0.90,
+                                source=self.name,
+                            )
+                        )
+                    except ValueError:
+                        continue
+
+        return output
 
 
 SAM3_CLASS_PROMPTS = ("sunglasses", "eyeglasses", "glasses", "rimless glasses")

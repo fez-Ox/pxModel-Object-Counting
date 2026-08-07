@@ -142,9 +142,87 @@ def decide(
     for item in evidence:
         grouped[item.instance_id].append(item)
     outputs: list[AttributionOutput] = []
+
+    t1 = getattr(config, "cascade_t1", 0.80)
+    t2 = getattr(config, "cascade_t2", 0.70)
+    t4 = getattr(config, "cascade_t4", 0.85)
+
     for instance in instances:
         values = dict(probabilities.get(instance.id, {"unknown": 1.0}))
         values.setdefault("unknown", 1.0)
+        inst_evidence = grouped[instance.id]
+
+        c1_ev = next((ev for ev in inst_evidence if ev.cue == "C1" and ev.confidence >= t1), None)
+        c2_ev = next((ev for ev in inst_evidence if ev.cue == "C2" and ev.confidence >= t2), None)
+        c4_ev = next((ev for ev in inst_evidence if ev.cue == "C4" and ev.confidence >= t4), None)
+
+        product_brand = c1_ev.brand if c1_ev else (c4_ev.brand if c4_ev else None)
+        zone_brand = c2_ev.brand if c2_ev else None
+
+        # Precision cascade decision list
+        if c1_ev:
+            outputs.append(
+                AttributionOutput(
+                    instance_id=instance.id,
+                    brand=c1_ev.brand,
+                    abstained=False,
+                    probabilities=values,
+                    evidence=inst_evidence,
+                    decision_debug={
+                        "gate": "precision_cascade",
+                        "path": "C1",
+                        "c1_confidence": c1_ev.confidence,
+                        "gates": {"tau": True, "margin": True, "beats_unknown": True},
+                    },
+                    product_brand=c1_ev.brand,
+                    zone_brand=zone_brand,
+                    decision_path="C1",
+                )
+            )
+            continue
+
+        if c2_ev:
+            outputs.append(
+                AttributionOutput(
+                    instance_id=instance.id,
+                    brand=c2_ev.brand,
+                    abstained=False,
+                    probabilities=values,
+                    evidence=inst_evidence,
+                    decision_debug={
+                        "gate": "precision_cascade",
+                        "path": "C2",
+                        "c2_confidence": c2_ev.confidence,
+                        "gates": {"tau": True, "margin": True, "beats_unknown": True},
+                    },
+                    product_brand=product_brand,
+                    zone_brand=c2_ev.brand,
+                    decision_path="C2",
+                )
+            )
+            continue
+
+        if c4_ev:
+            outputs.append(
+                AttributionOutput(
+                    instance_id=instance.id,
+                    brand=c4_ev.brand,
+                    abstained=False,
+                    probabilities=values,
+                    evidence=inst_evidence,
+                    decision_debug={
+                        "gate": "precision_cascade",
+                        "path": "C4",
+                        "c4_confidence": c4_ev.confidence,
+                        "gates": {"tau": True, "margin": True, "beats_unknown": True},
+                    },
+                    product_brand=c4_ev.brand,
+                    zone_brand=zone_brand,
+                    decision_path="C4",
+                )
+            )
+            continue
+
         candidates = sorted(
             ((brand, probability) for brand, probability in values.items() if brand != "unknown"),
             key=lambda item: item[1],
@@ -153,15 +231,19 @@ def decide(
         if not candidates:
             outputs.append(
                 AttributionOutput(
-                    instance.id,
-                    "unknown",
-                    True,
-                    values,
-                    grouped[instance.id],
-                    {"reason": "no_brand_candidates"},
+                    instance_id=instance.id,
+                    brand="unknown",
+                    abstained=True,
+                    probabilities=values,
+                    evidence=inst_evidence,
+                    decision_debug={"reason": "no_brand_candidates"},
+                    product_brand=None,
+                    zone_brand=None,
+                    decision_path="none",
                 )
             )
             continue
+
         best_brand, best_probability = candidates[0]
         runner_up = max(
             [values.get("unknown", 0.0)]
@@ -193,12 +275,15 @@ def decide(
         }
         outputs.append(
             AttributionOutput(
-                instance.id,
-                best_brand if accepted else "unknown",
-                not accepted,
-                values,
-                grouped[instance.id],
-                decision_debug,
+                instance_id=instance.id,
+                brand=best_brand if accepted else "unknown",
+                abstained=not accepted,
+                probabilities=values,
+                evidence=inst_evidence,
+                decision_debug=decision_debug,
+                product_brand=product_brand,
+                zone_brand=zone_brand,
+                decision_path="softmax" if accepted else "none",
             )
         )
     return outputs

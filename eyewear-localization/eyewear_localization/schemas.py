@@ -238,6 +238,9 @@ class AttributionOutput:
     probabilities: dict[str, float]
     evidence: list[Evidence] = field(default_factory=list)
     decision_debug: dict[str, Any] | None = None
+    product_brand: str | None = None
+    zone_brand: str | None = None
+    decision_path: str = "none"
 
     def __post_init__(self) -> None:
         if not self.instance_id:
@@ -245,6 +248,10 @@ class AttributionOutput:
         self.brand = self.brand.strip().lower()
         if not self.brand:
             raise ValueError("output brand must not be empty")
+        if self.product_brand is not None:
+            self.product_brand = self.product_brand.strip().lower()
+        if self.zone_brand is not None:
+            self.zone_brand = self.zone_brand.strip().lower()
         self.probabilities = {
             str(key).lower(): _confidence(value, name=f"probabilities[{key}]")
             for key, value in self.probabilities.items()
@@ -252,10 +259,18 @@ class AttributionOutput:
         if "unknown" not in self.probabilities:
             raise ValueError("output probabilities must include unknown")
 
+    @property
+    def final_brand(self) -> str:
+        return self.brand
+
     def to_dict(self) -> dict[str, Any]:
         value: dict[str, Any] = {
             "instance_id": self.instance_id,
             "brand": self.brand,
+            "final_brand": self.brand,
+            "product_brand": self.product_brand,
+            "zone_brand": self.zone_brand,
+            "decision_path": self.decision_path,
             "abstained": bool(self.abstained),
             "probabilities": dict(self.probabilities),
             "evidence": [item.to_dict() for item in self.evidence],

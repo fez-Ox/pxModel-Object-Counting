@@ -22,10 +22,13 @@ def annotate(image_path: str | Path, result: dict[str, Any]):
         x, y, width, height = instance["bbox"]
         decision = outputs.get(instance["id"], {})
         brand = decision.get("brand", "unknown")
+        path = decision.get("decision_path")
         color = (35, 180, 75, 230) if brand != "unknown" else (230, 155, 30, 230)
         draw.rectangle((x, y, x + width, y + height), outline=color, width=max(2, image.width // 500))
         label = f'{instance["id"]}: {brand}'
-        if decision.get("abstained"):
+        if path and path != "none":
+            label += f" ({path})"
+        elif decision.get("abstained"):
             label += " (abstain)"
         text_box = draw.textbbox((x, y), label, font=font)
         draw.rectangle(text_box, fill=color)

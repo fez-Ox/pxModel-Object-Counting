@@ -249,6 +249,7 @@ class _Column:
 def _infer_columns(
     header_signs: list[Sign],
     image_width: float | None = None,
+    median_width: float = 20.0,
 ) -> list[_Column]:
     """Infer display columns from header-band signs.
 
@@ -275,7 +276,12 @@ def _infer_columns(
         # Right boundary: midpoint between this sign's right edge and the
         # next sign's left edge.
         if i == len(sorted_signs) - 1:
-            right = image_width if image_width is not None else (sign.bbox[0] + sign.bbox[2] + 500)
+            if image_width is not None:
+                right = image_width
+            elif len(sorted_signs) == 1:
+                right = sign.bbox[0] + sign.bbox[2] + max(8.0 * median_width, 200.0)
+            else:
+                right = sign.bbox[0] + sign.bbox[2] + 500
         else:
             next_sign = sorted_signs[i + 1]
             this_right_edge = sign.bbox[0] + sign.bbox[2]
@@ -327,22 +333,28 @@ class SignageScopeCue:
     @staticmethod
     def _find_header_band(
         signs: list[Sign],
+        instances: list[Instance],
         median_height: float,
     ) -> tuple[list[Sign], list[Sign]]:
         """Partition signs into header-band signs and remaining signs.
 
         Header signs are those near the topmost sign row (within
-        2× median instance height of the minimum sign y-center).
+        2× median instance height of the minimum sign y-center) AND
+        whose bottom edge is above the instance row.
         """
         if not signs:
             return [], []
-        # Find topmost sign y-center.
         min_y_center = min(_center(s.bbox)[1] for s in signs)
         band_threshold = max(2.0 * median_height, 40.0)
+        min_inst_y = min((inst.bbox[1] for inst in instances), default=float("inf")) if instances else float("inf")
+
         headers: list[Sign] = []
         others: list[Sign] = []
         for sign in signs:
-            if abs(_center(sign.bbox)[1] - min_y_center) <= band_threshold:
+            sign_y_center = _center(sign.bbox)[1]
+            sign_bottom = sign.bbox[1] + sign.bbox[3]
+            is_above = sign_bottom <= min_inst_y + median_height * 0.5
+            if abs(sign_y_center - min_y_center) <= band_threshold and is_above:
                 headers.append(sign)
             else:
                 others.append(sign)
@@ -358,9 +370,12 @@ class SignageScopeCue:
         for col in columns:
             if col.left <= cx <= col.right:
                 return col
-        # Fallback: find the nearest column by centroid distance.
+        # Fallback: find the nearest column if within reasonable distance (<= 8x median width)
         if columns:
-            return min(columns, key=lambda c: abs((c.left + c.right) / 2.0 - cx))
+            nearest = min(columns, key=lambda c: abs((c.left + c.right) / 2.0 - cx))
+            dist = max(0.0, nearest.left - cx) if cx < nearest.left else max(0.0, cx - nearest.right)
+            if dist <= 80.0:
+                return nearest
         return None
 
     @staticmethod
@@ -447,7 +462,7 @@ class SignageScopeCue:
                 active_signs.append(sign)
 
         # Step 1: Identify the header band and infer column boundaries.
-        header_signs, non_header_signs = self._find_header_band(active_signs, median_height)
+        header_signs, non_header_signs = self._find_header_band(active_signs, instances, median_height)
 
         # Only instances below the header band are candidates for column assignment.
         if header_signs:
@@ -459,7 +474,7 @@ class SignageScopeCue:
         else:
             below_instances = list(instances)
 
-        columns = _infer_columns(header_signs, image_width)
+        columns = _infer_columns(header_signs, image_width, median_width)
 
         # Step 2: Assign instances to columns and emit evidence for header signs.
         # Deduplicate: emit evidence only once per (instance, brand) pair,
