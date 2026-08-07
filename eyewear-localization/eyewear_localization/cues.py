@@ -352,8 +352,7 @@ class SignageScopeCue:
         others: list[Sign] = []
         for sign in signs:
             sign_y_center = _center(sign.bbox)[1]
-            sign_bottom = sign.bbox[1] + sign.bbox[3]
-            is_above = sign_bottom <= min_inst_y + median_height * 0.5
+            is_above = (min_inst_y == float("inf")) or (sign_y_center < min_inst_y + median_height * 0.25)
             if abs(sign_y_center - min_y_center) <= band_threshold and is_above:
                 headers.append(sign)
             else:

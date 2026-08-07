@@ -14,6 +14,10 @@ dependencies = [
 ocr = [
   "easyocr>=1.7.2",
 ]
+florence2 = [
+  "torch>=2.0.0",
+  "transformers>=4.40.0",
+]
 sam3 = [
   "torch>=2.5.0",
   "torchvision>=0.20.0",

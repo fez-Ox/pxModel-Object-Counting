@@ -84,6 +84,43 @@ Inference requires the gated `sam3.pt` checkpoint at
 `cd sam3-verbose-counting && uv run python download_model.py`). Kaggle notebook:
 `sam3_verbose_counting_kaggle.ipynb`.
 
+#### Implemented: Robust Eyewear Brand Attribution (`eyewear-localization/`)
+
+A standalone brand attribution system implemented at `eyewear-localization/` following Specification v2 (`Fix.md`). The pipeline decouples L0 perception, cue evidence generation, and precision decision logic:
+
+```
+Display Image ──► [L0 Perception Frontend]
+                   ├── SAM3 Localizer (Class-Agnostic)
+                   ├── Zero-Shot OCR (Florence-2 / EasyOCR)
+                   └── Scene Filter (Shelf / Person / Poster)
+                                │
+                                ▼
+                   ┌───────────────────────────┐
+                   │   Independent Cue Ev.    │
+                   │  C1: Florence-2 Frame OCR │
+                   │  C2: 3-Stage Scope        │
+                   │  C3: Spatial Continuity   │
+                   │  C4: Style Gallery Prior  │
+                   └────────────┬──────────────┘
+                                │
+                                ▼
+                   ┌───────────────────────────┐
+                   │   L2 Precision Cascade    │
+                   │ Priority: C1 > C2 > C3 > C4│
+                   └────────────┬──────────────┘
+                                │
+                                ▼
+              AttributionOutput (product_brand, zone_brand, final_brand)
+```
+
+- **Zero-Shot C1 (On-Product Branding)**: Uses `microsoft/Florence-2-base` (`Florence2OCRBackend`) running directly on frame crops without fine-tuning, strictly obeying Invariant I7 (no generative super-resolution).
+- **Deterministic C2 (Signage Scope)**: 3-stage pure geometry pipeline (`Parse` $\rightarrow$ `Attach` $\rightarrow$ `Assign`) obeying Invariant I8 (zero VLM calls inside C2).
+- **L2 Precision Cascade**: Priority decision list replacing fragile Softmax probability fusion, eliminating artificial `max_per_evidence` caps that caused valid attributions to abstain as `unknown`.
+- **Label Semantics**: Explicitly separates `product_brand` (physical object brand) vs `zone_brand` (display bay brand) on `AttributionOutput`.
+- **Auditable Visual Overlay**: Visualizes `decision_path` (`inst_0001: Gucci (via C2)` or `inst_0001: Ray-Ban (via C1)`).
+- **Unit Tests**: `cd eyewear-localization && uv run pytest` (44 unit tests passing).
+- **Kaggle Notebook**: `eyewear_localization_kaggle.ipynb`.
+
 ### Phase 2: Resource-constrained (smartphone)
 
 - **Target**: On-device inference (smartphone-class compute)

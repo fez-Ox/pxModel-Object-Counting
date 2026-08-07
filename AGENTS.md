@@ -47,12 +47,25 @@ Single-file project. Entrypoint: `main.py` — tests DinoV2 and DinoV3 via Huggi
   (requires an approved `HF_TOKEN` / Kaggle secret).
 - Kaggle notebook: `sam3_verbose_counting_kaggle.ipynb` (setup, download, sunglasses inference, cleanup).
 
+## Robust eyewear brand attribution (`eyewear-localization/`)
+
+- Standalone brand attribution package following Specification v2 (`Fix.md`).
+- **L0 Perception**: Class-agnostic SAM3 localizer + zero-shot OCR (**Florence-2** via `Florence2OCRBackend` with fallback to EasyOCR) + scene filter.
+- **C1 On-Product Branding**: Zero-shot Florence-2 OCR running on instance crops (no fine-tuning, no generative super-resolution).
+- **C2 Signage Scope**: 3-stage pure deterministic geometry (`Parse` $\rightarrow$ `Attach` $\rightarrow$ `Assign`). Zero VLM calls inside C2.
+- **L2 Precision Cascade**: Priority decision list (`C1` physical brand $>` `C2` signage zone scope $>` `C3` spatial continuity $>` `C4` style prior $>` `unknown`) replacing Softmax probability fusion.
+- **Label Semantics**: Distinguishes `product_brand` (physical frame) vs `zone_brand` (display bay) on `AttributionOutput`.
+- **Inference CLI**: `cd eyewear-localization && uv run python infer.py image.jpg --ocr-backend florence2`
+- **Test suite**: `cd eyewear-localization && uv run pytest` (44 unit tests covering schemas, perception, C2 determinism, and precision cascade).
+- **Kaggle notebook**: `eyewear_localization_kaggle.ipynb` (CUDA GPU execution).
+
 ## Design doc
 
 `DESIGN.md` tracks architecture decisions. Two phases:
-- **Phase 1** (desktop GPU, ≤20GB): CountAnything-based, then extend to image-based one-shot
+- **Phase 1** (desktop GPU, ≤20GB): CountAnything-based, native SAM3, and eyewear brand attribution pipeline
 - **Phase 2** (smartphone): lightweight approach TBD
 
-## What's missing
+## Testing & Quality
 
-No tests, no lint/format config, no CI. Do not assume any test runner or formatter exists.
+- Test runner: `uv run pytest` inside `eyewear-localization/tests`
+- Standard Python 3.12 syntax with type annotations.
