@@ -66,6 +66,28 @@ class LocalizationConfig:
             },
         }
 
+    def with_overrides(self, overrides: Mapping[str, Any] | None) -> "LocalizationConfig":
+        """Return a copy with nested overrides applied on top of this config.
+
+        ``overrides`` uses the same nested shape as the YAML file, e.g.
+        ``{"fusion": {"tau": 0.5}, "cue_reliability": {"C2": 0.8}}``.
+        Values are deep-merged: unspecified keys keep their current value.
+        """
+        if not overrides:
+            return self
+        merged = _deep_merge(self.to_dict(), dict(overrides))
+        return config_from_mapping(merged)
+
+
+def _deep_merge(base: dict[str, Any], update: Mapping[str, Any]) -> dict[str, Any]:
+    result = dict(base)
+    for key, value in update.items():
+        if isinstance(value, Mapping) and isinstance(result.get(key), dict):
+            result[key] = _deep_merge(result[key], value)
+        else:
+            result[key] = value
+    return result
+
 
 def _probability(value: Any, name: str) -> float:
     result = float(value)

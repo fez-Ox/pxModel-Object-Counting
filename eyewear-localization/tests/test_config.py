@@ -2,7 +2,7 @@ from pathlib import Path
 import tempfile
 import unittest
 
-from eyewear_localization.config import load_config
+from eyewear_localization.config import LocalizationConfig, load_config
 
 
 class ConfigTests(unittest.TestCase):
@@ -21,3 +21,77 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(config.gazetteer, ["cartier"])
         self.assertFalse(config.use_vlm_audit)
         self.assertEqual(config.uncertainty_band, (0.45, 0.7))
+
+
+class OverrideTests(unittest.TestCase):
+    def setUp(self):
+        self.config = LocalizationConfig(
+            gazetteer=["cartier"],
+            tau=0.6,
+            margin=0.15,
+            temperature=0.6,
+            smoothing_lambda=0.25,
+        )
+
+    def test_with_overrides_returns_copy(self):
+        new = self.config.with_overrides({"fusion": {"tau": 0.5}})
+        self.assertEqual(new.tau, 0.5)
+        self.assertEqual(self.config.tau, 0.6, "original unchanged")
+
+    def test_with_overrides_deep_merges_cue_reliability(self):
+        new = self.config.with_overrides({"cue_reliability": {"C2": 0.9}})
+        self.assertEqual(new.cue_reliability["C2"], 0.9)
+        self.assertEqual(new.cue_reliability["C1"], 0.95, "other cues preserved")
+
+    def test_with_overrides_none_returns_self(self):
+        self.assertIs(self.config.with_overrides(None), self.config)
+        self.assertIs(self.config.with_overrides({}), self.config)
+
+    def test_with_overrides_smoothing(self):
+        new = self.config.with_overrides({"smoothing": {"lambda": 0.4}})
+        self.assertEqual(new.smoothing_lambda, 0.4)
+        self.assertEqual(new.smoothing_gate_punknown, 0.5, "other smoothing preserved")
+
+    def test_cli_parse_set_builds_nested_dict(self):
+        from eyewear_localization.cli import set_overrides_from_args
+        from argparse import Namespace
+        args = Namespace(
+            set=["fusion.tau=0.5", "cue_reliability.C2=0.8"],
+            tau=None, margin=None, temperature=None, unknown_prior=None,
+            smooth_lambda=None, smooth_gate=None,
+            person_threshold=None, poster_threshold=None, shelf_threshold=None,
+            cue_reliability=[],
+        )
+        overrides = set_overrides_from_args(args)
+        self.assertEqual(overrides["fusion"]["tau"], 0.5)
+        self.assertEqual(overrides["cue_reliability"]["C2"], 0.8)
+
+    def test_cli_sugar_flags_take_precedence(self):
+        from eyewear_localization.cli import set_overrides_from_args
+        from argparse import Namespace
+        args = Namespace(
+            set=["fusion.tau=0.1"],
+            tau=0.9, margin=0.2, temperature=None, unknown_prior=None,
+            smooth_lambda=None, smooth_gate=None,
+            person_threshold=None, poster_threshold=None, shelf_threshold=None,
+            cue_reliability=["C1=0.7"],
+        )
+        overrides = set_overrides_from_args(args)
+        self.assertEqual(overrides["fusion"]["tau"], 0.9, "sugar overrides --set")
+        self.assertEqual(overrides["fusion"]["margin"], 0.2)
+        self.assertEqual(overrides["cue_reliability"]["C1"], 0.7)
+
+    def test_full_round_trip_overrides_to_config(self):
+        new = self.config.with_overrides({
+            "fusion": {"tau": 0.35, "margin": 0.1},
+            "smoothing": {"lambda": 0.4},
+            "cue_reliability": {"C2": 0.8},
+        })
+        self.assertEqual(new.tau, 0.35)
+        self.assertEqual(new.margin, 0.1)
+        self.assertEqual(new.smoothing_lambda, 0.4)
+        self.assertEqual(new.cue_reliability["C1"], 0.95)
+        self.assertEqual(new.cue_reliability["C2"], 0.8)
+        raw = new.to_dict()
+        self.assertEqual(raw["fusion"]["tau"], 0.35)
+        self.assertEqual(raw["cue_reliability"]["C2"], 0.8)

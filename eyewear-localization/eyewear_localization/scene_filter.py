@@ -169,7 +169,20 @@ class SAM3SceneFilter:
         return kept, excluded
 
 
-def build_scene_filter(localizer: object, *, require_shelf: bool = True) -> SceneFilter:
+def build_scene_filter(
+    localizer: object,
+    *,
+    require_shelf: bool = True,
+    person_threshold: float = 0.25,
+    poster_threshold: float = 0.25,
+    shelf_threshold: float = 0.20,
+) -> SceneFilter:
     if isinstance(localizer, SAM3Localizer):
-        return SAM3SceneFilter(localizer, require_shelf=require_shelf)
+        return SAM3SceneFilter(
+            localizer,
+            require_shelf=require_shelf,
+            person_threshold=person_threshold,
+            poster_threshold=poster_threshold,
+            shelf_threshold=shelf_threshold,
+        )
     return NullSceneFilter("class-agnostic SAM3 scene filter unavailable")

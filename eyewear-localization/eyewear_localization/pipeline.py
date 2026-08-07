@@ -116,5 +116,6 @@ class LocalizationPipeline:
                 "ocr": backend_info(self.frontend.ocr),
                 "poster_detector": backend_info(self.frontend.poster_detector),
             },
+            "effective_config": self.config.to_dict(),
         }
         return result

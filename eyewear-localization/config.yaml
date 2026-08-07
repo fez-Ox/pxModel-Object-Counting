@@ -27,7 +27,7 @@ cue_reliability:
 fusion:
   temperature: 0.6
   unknown_prior: 0.35
-  tau: 0.6
+  tau: 0.4
   margin: 0.15
 
 smoothing:
