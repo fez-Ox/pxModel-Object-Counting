@@ -26,6 +26,27 @@ Single-file project. Entrypoint: `main.py` — tests DinoV2 and DinoV3 via Huggi
 - **Inference is subprocess-based**: `CountAnything.__call__` spawns `python -m count_anything.train.train` under the hood with a temporary config/annotation — not a direct model call
 - **Output dir**: defaults to `exp/count_anything_inference/` (created on demand)
 
+## Native SAM3 verbose counting (`sam3-verbose-counting/`)
+
+- Standalone app, independent of `count-anything/` (no imports or deps shared)
+- **Detection tasks are decoupled** under `sam3-verbose-counting/detectors/`:
+  - `base.py` — `DetectionTask` base class + `DetectionOptions` dataclass
+  - `__init__.py` — registry (`register`, `get_detector`, `list_detectors`)
+  - `sunglasses.py` — the sunglasses detection task (the only registered task)
+- The generic, detection-agnostic core is `sam3-verbose-counting/infer.py`
+  (`Sam3VerboseCounter`, `build_counter`, `annotate`). Brand-label detection was
+  removed; **future detections** are added as new `detectors/<name>.py` modules
+  subclassing `DetectionTask` and registered with `@register` — no edits to the
+  sunglasses task (or any other task) are required.
+- **Inference CLI**: `cd sam3-verbose-counting && uv run python infer.py image.jpg "prompt"`
+  or `--detector sunglasses`. `--detector <name>` selects a task and `--prompt`
+  overrides the detector default (otherwise the final positional arg is the prompt).
+  The default task is `sunglasses` (counts displayed pairs, excluding pairs worn on people).
+- **Checkpoint missing**: `sam3-verbose-counting/checkpoints/sam3.pt` (gated on
+  HuggingFace). Download via `cd sam3-verbose-counting && uv run python download_model.py`
+  (requires an approved `HF_TOKEN` / Kaggle secret).
+- Kaggle notebook: `sam3_verbose_counting_kaggle.ipynb` (setup, download, sunglasses inference, cleanup).
+
 ## Design doc
 
 `DESIGN.md` tracks architecture decisions. Two phases:

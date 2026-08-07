@@ -19,8 +19,8 @@ gazetteer:
   - tiffany & co
 
 cue_reliability:
-  C1: 0.95
-  C2: 0.85
+  C1: 0.7
+  C2: 0.7
   C4: 0.35
   L3: 0.70
 

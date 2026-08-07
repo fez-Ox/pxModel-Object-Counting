@@ -67,6 +67,23 @@ Text ───┘                     └── Text encoder (tokenizer + transf
 3. Extend for **image-based one-shot**: replace the text prompt with visual features extracted from the support image (e.g., encode support, use its patch features as the prompt instead of text embeddings)
 4. Remix the pipeline: potentially replace SAM3 backbone with DinoV2/DinoV3 if needed for the one-shot variant
 
+#### Implemented: native SAM3 verbose counting (`sam3-verbose-counting/`)
+
+A standalone native-SAM3 counter is implemented at `sam3-verbose-counting/`,
+independent of the `count-anything/` clone. The core (`infer.Sam3VerboseCounter`)
+is detection-agnostic: a verbose text prompt yields text-grounded boxes → count,
+with overlap filtering and redundant-box cleanup. Concrete detections are
+**decoupled** as tasks under `detectors/` (`DetectionTask` base + registry +
+`sunglasses.py`). The sunglasses task counts displayed pairs while excluding
+pairs worn on people. Brand-label detection was intentionally removed; adding a
+future detection is a new `detectors/<name>.py` module registered with
+`@register` — no edits to the sunglasses task (or any other task) are needed.
+
+Inference requires the gated `sam3.pt` checkpoint at
+`sam3-verbose-counting/checkpoints/sam3.pt` (download with
+`cd sam3-verbose-counting && uv run python download_model.py`). Kaggle notebook:
+`sam3_verbose_counting_kaggle.ipynb`.
+
 ### Phase 2: Resource-constrained (smartphone)
 
 - **Target**: On-device inference (smartphone-class compute)

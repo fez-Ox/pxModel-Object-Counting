@@ -1,25 +1,26 @@
 #!/usr/bin/env python3
 """Count objects in images with native SAM3 and verbose text prompts.
 
+The core (:class:`Sam3VerboseCounter`) is detection-agnostic. Concrete
+detection tasks live in :mod:`detectors` and are completely decoupled from one
+another (see :func:`detectors.get_detector`); the default task counts
+sunglasses.
+
 CLI examples:
   uv run python infer.py image.jpg "all pairs of black sunglasses displayed on the retail rack"
-  uv run python infer.py images/ "all pairs of black sunglasses displayed on the retail rack"
-  uv run python infer.py images/ "all pairs of black sunglasses displayed on the retail rack" --recursive
-  uv run python infer.py https://example.com/image.jpg "the red cars parked beside the building"
+  uv run python infer.py images/ "pairs of sunglasses on the rack" --recursive
+  uv run python infer.py https://example.com/image.jpg --detector sunglasses
 
-Notebook / library usage (run from a project root that has `sam3-verbose-counting/`
-on ``sys.path``, with the ``sam3.pt`` checkpoint downloaded):
+Library usage (run from a project root that has `sam3-verbose-counting/` on
+``sys.path``, with the ``sam3.pt`` checkpoint downloaded):
 
-     from infer import build_counter, annotate_brands
+     from infer import build_counter
+     from detectors import get_detector, DetectionOptions
 
-     counter = build_counter(threshold=0.5)          # loads sam3.pt on cuda (or cpu)
-     result = counter.infer_brands("image.jpg", {
-         "Brand A": "Brand A sunglasses on the retail rack",
-         "Brand B": "Brand B sunglasses on the retail rack",
-     })
-     annotated = annotate_brands("image.jpg", result["brands"])
-     print(result["total_count"])
-     annotated.save("annotated.jpg")
+     counter = build_counter(threshold=0.5)         # loads sam3.pt on cuda (or cpu)
+     sunglasses = get_detector("sunglasses")         # decoupled detection task
+     result = sunglasses.run(counter, "image.jpg", DetectionOptions())
+     print(result["count"])
 """
 
 from __future__ import annotations
@@ -32,10 +33,11 @@ import tempfile
 import time
 import urllib.error
 import urllib.request
-from collections.abc import Mapping
 from contextlib import nullcontext
 from pathlib import Path
 from urllib.parse import unquote, urlparse
+
+from detectors import DetectionOptions, get_detector, list_detectors
 
 APP_ROOT = Path(__file__).resolve().parent
 DEFAULT_CHECKPOINT = APP_ROOT / "checkpoints" / "sam3.pt"
@@ -46,7 +48,6 @@ __all__ = [
     "Sam3VerboseCounter",
     "build_counter",
     "annotate",
-    "annotate_brands",
     "filter_overlapping",
     "suppress_redundant_boxes",
     "resolve_checkpoint",
@@ -181,99 +182,6 @@ def annotate(image_path: Path, prompt: str, boxes: list[list[float]], scores: li
     )
     draw.text((padding, padding), label, fill=(255, 255, 255, 255), font=font)
     return image
-
-
-def annotate_brands(
-    image_path: Path,
-    brands: Mapping[str, Mapping[str, object]],
-):
-    """Draw color-coded, labeled boxes for a multi-brand result."""
-    from PIL import Image, ImageDraw, ImageFont
-
-    image = Image.open(image_path).convert("RGB")
-    draw = ImageDraw.Draw(image, "RGBA")
-    width, height = image.size
-    line_width = max(2, round(min(width, height) / 300))
-    try:
-        font = ImageFont.truetype("DejaVuSans.ttf", size=max(16, width // 55))
-    except Exception:
-        font = ImageFont.load_default()
-
-    colors = (
-        (35, 135, 235, 255),
-        (235, 125, 35, 255),
-        (35, 170, 90, 255),
-        (175, 70, 205, 255),
-        (215, 45, 125, 255),
-        (35, 175, 180, 255),
-    )
-    total = 0
-    legend: list[str] = []
-    for brand_index, (brand, result) in enumerate(brands.items()):
-        boxes = result.get("boxes", [])
-        scores = result.get("scores", [])
-        if not isinstance(boxes, list) or not isinstance(scores, list):
-            raise ValueError(f"Brand result for {brand!r} must contain box and score lists")
-        if len(boxes) != len(scores):
-            raise ValueError(f"Brand result for {brand!r} has mismatched boxes and scores")
-        color = colors[brand_index % len(colors)]
-        total += len(boxes)
-        legend.append(f"{brand}: {len(boxes)}")
-        for index, (box, score) in enumerate(zip(boxes, scores), start=1):
-            x0, y0, x1, y1 = box
-            draw.rectangle((x0, y0, x1, y1), outline=color, width=line_width)
-            label = f"{brand} {index}: {score:.2f}"
-            text_box = draw.textbbox((x0, y0), label, font=font)
-            draw.rectangle(text_box, fill=(*color[:3], 220))
-            draw.text((x0, y0), label, fill=(255, 255, 255, 255), font=font)
-
-    title = f"{total} detected | " + " | ".join(legend)
-    text_box = draw.textbbox((0, 0), title, font=font)
-    padding = 8
-    draw.rectangle(
-        (0, 0, text_box[2] + padding * 2, text_box[3] + padding * 2),
-        fill=(0, 0, 0, 180),
-    )
-    draw.text((padding, padding), title, fill=(255, 255, 255, 255), font=font)
-    return image
-
-
-def _normalize_brand_prompts(brand_prompts: Mapping[str, str]) -> dict[str, str]:
-    if not isinstance(brand_prompts, Mapping) or not brand_prompts:
-        raise ValueError("brand_prompts must be a non-empty mapping")
-
-    normalized: dict[str, str] = {}
-    seen_labels: set[str] = set()
-    for raw_label, raw_prompt in brand_prompts.items():
-        if not isinstance(raw_label, str) or not isinstance(raw_prompt, str):
-            raise ValueError("brand labels and prompts must be strings")
-        label = raw_label.strip()
-        prompt = raw_prompt.strip()
-        if not label or not prompt:
-            raise ValueError("brand labels and prompts must not be empty")
-        label_key = label.casefold()
-        if label_key in seen_labels:
-            raise ValueError(f"duplicate brand label: {label}")
-        seen_labels.add(label_key)
-        normalized[label] = prompt
-    return normalized
-
-
-def _parse_brand_specs(specs: list[str]) -> dict[str, str]:
-    if not specs:
-        return {}
-    parsed: dict[str, str] = {}
-    seen_labels: set[str] = set()
-    for spec in specs:
-        label, separator, prompt = spec.partition("=")
-        if not separator:
-            raise ValueError(f"brand must use LABEL=PROMPT syntax: {spec!r}")
-        label_key = label.strip().casefold()
-        if label_key in seen_labels:
-            raise ValueError(f"duplicate brand label: {label.strip()}")
-        seen_labels.add(label_key)
-        parsed[label] = prompt
-    return _normalize_brand_prompts(parsed)
 
 
 def _box_area(box: list[float]) -> float:
@@ -549,159 +457,6 @@ class Sam3VerboseCounter:
             )
         return result
 
-    def infer_brands(
-        self,
-        image_path: Path,
-        brand_prompts: Mapping[str, str],
-        *,
-        filter_prompt: str | None = None,
-        filter_center: bool = True,
-        filter_iou: float = 0.0,
-        box_cleanup: bool = True,
-        box_duplicate_iou: float = 0.9,
-        box_min_children: int = 2,
-        box_min_area_ratio: float = 1.25,
-    ) -> dict:
-        """Localize each brand in one image with one shared image encoding.
-
-        ``brand_prompts`` maps display labels to independent SAM3 text
-        prompts. The image backbone runs once; each prompt then gets its own
-        detection pass. Optional cleanup and filter detections are applied to
-        every brand independently.
-        """
-        normalized_brands = _normalize_brand_prompts(brand_prompts)
-        if filter_prompt and not (filter_center or filter_iou > 0):
-            raise ValueError("filter_prompt needs filter_center and/or filter_iou > 0")
-
-        torch = self.torch
-        is_cuda = self.device.type == "cuda"
-        if is_cuda:
-            torch.cuda.synchronize(self.device)
-            torch.cuda.reset_peak_memory_stats(self.device)
-        start = time.perf_counter()
-
-        image_state = None
-        states: list[dict] = []
-        try:
-            with torch.inference_mode(), self._autocast():
-                image_state = self.processor.set_image(image_path_to_pil(image_path))
-
-            image_backbone = dict(image_state["backbone_out"])
-            original_height = image_state["original_height"]
-            original_width = image_state["original_width"]
-
-            brand_results: dict[str, dict] = {}
-            for label, prompt in normalized_brands.items():
-                state = {
-                    "original_height": original_height,
-                    "original_width": original_width,
-                    "backbone_out": dict(image_backbone),
-                }
-                states.append(state)
-                with torch.inference_mode(), self._autocast():
-                    state = self.processor.set_text_prompt(prompt, state)
-
-                raw_boxes = state.get("boxes", torch.empty((0, 4))).detach().cpu().tolist()
-                raw_scores = state.get("scores", torch.empty((0,))).detach().cpu().tolist()
-                if box_cleanup:
-                    target_boxes, target_scores, redundant_removed = suppress_redundant_boxes(
-                        raw_boxes,
-                        raw_scores,
-                        duplicate_iou=box_duplicate_iou,
-                        min_children=box_min_children,
-                        min_enclosing_area_ratio=box_min_area_ratio,
-                    )
-                else:
-                    target_boxes, target_scores, redundant_removed = raw_boxes, raw_scores, []
-
-                brand_results[label] = {
-                    "prompt": prompt,
-                    "raw_boxes": raw_boxes,
-                    "raw_scores": raw_scores,
-                    "raw_count": len(raw_boxes),
-                    "boxes": target_boxes,
-                    "scores": target_scores,
-                    "count": len(target_boxes),
-                    "deduplicated_count": len(target_boxes),
-                    "redundant_box_count": len(redundant_removed),
-                }
-
-            filter_boxes: list[list[float]] = []
-            if filter_prompt:
-                filter_state = {
-                    "original_height": original_height,
-                    "original_width": original_width,
-                    "backbone_out": dict(image_backbone),
-                }
-                states.append(filter_state)
-                with torch.inference_mode(), self._autocast():
-                    filter_state = self.processor.set_text_prompt(filter_prompt, filter_state)
-                filter_boxes = (
-                    filter_state.get("boxes", torch.empty((0, 4))).detach().cpu().tolist()
-                )
-
-                for result in brand_results.values():
-                    kept_boxes, kept_scores, filter_removed = filter_overlapping(
-                        result["boxes"],
-                        result["scores"],
-                        filter_boxes,
-                        center=filter_center,
-                        iou=filter_iou,
-                    )
-                    result["boxes"] = kept_boxes
-                    result["scores"] = kept_scores
-                    result["count"] = len(kept_boxes)
-                    result["filtered_count"] = len(filter_removed)
-                    result["filter_prompt"] = filter_prompt
-                    result["filter_object_count"] = len(filter_boxes)
-
-            if is_cuda:
-                torch.cuda.synchronize(self.device)
-            elapsed = time.perf_counter() - start
-            peak_allocated = (
-                torch.cuda.max_memory_allocated(self.device) / (1024**2) if is_cuda else None
-            )
-            peak_reserved = (
-                torch.cuda.max_memory_reserved(self.device) / (1024**2) if is_cuda else None
-            )
-
-            result = {
-                "brands": brand_results,
-                "brand_count": len(brand_results),
-                "total_count": sum(item["count"] for item in brand_results.values()),
-                "inference_time_seconds": elapsed,
-                "peak_vram_mb": peak_allocated,
-                "peak_reserved_vram_mb": peak_reserved,
-            }
-            if box_cleanup or filter_prompt:
-                result.update(
-                    {
-                        "raw_total_count": sum(item["raw_count"] for item in brand_results.values()),
-                        "deduplicated_total_count": sum(
-                            item["deduplicated_count"] for item in brand_results.values()
-                        ),
-                        "redundant_box_count": sum(
-                            item["redundant_box_count"] for item in brand_results.values()
-                        ),
-                    }
-                )
-            if filter_prompt:
-                result.update(
-                    {
-                        "filter_prompt": filter_prompt,
-                        "filter_object_count": len(filter_boxes),
-                        "filtered_count": sum(
-                            item["filtered_count"] for item in brand_results.values()
-                        ),
-                    }
-                )
-            return result
-        finally:
-            if image_state is not None:
-                image_state.clear()
-            for state in states:
-                state.clear()
-
 
 def build_counter(
     *,
@@ -750,133 +505,80 @@ def image_path_to_pil(path: Path):
 def main() -> None:
     parser = argparse.ArgumentParser(
         description=(
-            "Count objects with native SAM3 using a verbose text prompt, or "
-            "localize multiple brands with repeated --brand options."
+            "Run a detection task (default: sunglasses) over images using "
+            "native SAM3 and verbose text prompts."
         )
     )
     parser.add_argument(
         "items",
         nargs="+",
         help=(
-            "Image path(s), folder(s), or http(s) URL(s); in legacy mode the "
-            "final item is the prompt"
+            "Image path(s), folder(s), or http(s) URL(s); unless --prompt is "
+            "given, the final item is the text prompt"
         ),
     )
     parser.add_argument(
-        "--brand",
-        action="append",
-        default=[],
-        metavar="LABEL=PROMPT",
+        "--detector",
+        default="sunglasses",
         help=(
-            "Localize one brand with a text prompt; repeat for multiple brands "
-            "(e.g. 'Ray-Ban=Ray-Ban sunglasses')"
+            "Which detection task to run (default: sunglasses). "
+            f"Available: {', '.join(list_detectors())}."
         ),
     )
     parser.add_argument(
-        "--checkpoint",
-        "-c",
-        default=str(DEFAULT_CHECKPOINT),
-        help="Path to sam3.pt (default: checkpoints/sam3.pt)",
-    )
-    parser.add_argument(
-        "--out",
-        "-o",
-        default=str(DEFAULT_OUTPUT),
-        help="Output directory for visualizations and JSON files",
-    )
-    parser.add_argument(
-        "--threshold",
-        type=float,
-        default=0.5,
-        help="SAM3 confidence threshold (default: 0.5)",
-    )
-    parser.add_argument(
-        "--recursive",
-        "-r",
-        action="store_true",
-        help="Include images in subfolders",
-    )
-    parser.add_argument(
-        "--download-timeout",
-        type=int,
-        default=30,
-        help="Timeout in seconds for image URLs (default: 30)",
-    )
-    parser.add_argument(
-        "--device",
+        "--prompt",
         default=None,
-        help="Torch device (default: cuda when available, otherwise cpu)",
+        help=(
+            "Text prompt describing the objects to count; overrides the "
+            "detector default and the trailing positional prompt"
+        ),
     )
-    parser.add_argument(
-        "--no-amp",
-        action="store_true",
-        help="Disable CUDA automatic mixed precision",
-    )
-    parser.add_argument(
-        "--show",
-        "-s",
-        action="store_true",
-        help="Display each visualization if a display is available",
-    )
-    parser.add_argument(
-        "--filter-prompt",
-        default=None,
-        help="Second prompt whose detections suppress target boxes "
-        "(e.g. 'faces of people'); any target box overlapping a "
-        "detection is dropped from the count",
-    )
-    parser.add_argument(
-        "--filter-center",
-        action=argparse.BooleanOptionalAction,
-        default=True,
-        help="Drop a target box when its center lies inside a filter detection "
-        "(default: on; use --no-filter-center to disable)",
-    )
-    parser.add_argument(
-        "--filter-iou",
-        type=float,
-        default=0.0,
-        help="Also drop a target box when its IoU with any filter detection "
-        "reaches this value (default: 0.0 = disabled)",
-    )
-    parser.add_argument(
-        "--no-box-cleanup",
-        action="store_true",
-        help="Keep duplicate and multi-instance enclosing boxes",
-    )
-    parser.add_argument(
-        "--box-duplicate-iou",
-        type=float,
-        default=0.9,
-        help="IoU threshold for suppressing duplicate boxes (default: 0.9)",
-    )
-    parser.add_argument(
-        "--box-min-children",
-        type=int,
-        default=2,
-        help="Minimum contained instances needed to remove an enclosing box (default: 2)",
-    )
-    parser.add_argument(
-        "--box-min-area-ratio",
-        type=float,
-        default=1.25,
-        help="Minimum enclosing/child area ratio (default: 1.25)",
-    )
+    parser.add_argument("--checkpoint", "-c", default=str(DEFAULT_CHECKPOINT),
+                        help="Path to sam3.pt (default: checkpoints/sam3.pt)")
+    parser.add_argument("--out", "-o", default=str(DEFAULT_OUTPUT),
+                        help="Output directory for visualizations and JSON files")
+    parser.add_argument("--threshold", type=float, default=0.5,
+                        help="SAM3 confidence threshold (default: 0.5)")
+    parser.add_argument("--recursive", "-r", action="store_true",
+                        help="Include images in subfolders")
+    parser.add_argument("--download-timeout", type=int, default=30,
+                        help="Timeout in seconds for image URLs (default: 30)")
+    parser.add_argument("--device", default=None,
+                        help="Torch device (default: cuda when available, otherwise cpu)")
+    parser.add_argument("--no-amp", action="store_true",
+                        help="Disable CUDA automatic mixed precision")
+    parser.add_argument("--show", "-s", action="store_true",
+                        help="Display each visualization if a display is available")
+    parser.add_argument("--filter-prompt", default=None,
+                        help="Second prompt whose detections suppress target boxes (e.g. 'faces of people')")
+    parser.add_argument("--filter-center", action=argparse.BooleanOptionalAction, default=True,
+                        help="Drop a target box when its center lies inside a filter detection "
+                             "(default: on; use --no-filter-center to disable)")
+    parser.add_argument("--filter-iou", type=float, default=0.0,
+                        help="Also drop a target box when its IoU with any filter detection "
+                             "reaches this value (default: 0.0 = disabled)")
+    parser.add_argument("--no-box-cleanup", action="store_true",
+                        help="Keep duplicate and multi-instance enclosing boxes")
+    parser.add_argument("--box-duplicate-iou", type=float, default=0.9,
+                        help="IoU threshold for suppressing duplicate boxes (default: 0.9)")
+    parser.add_argument("--box-min-children", type=int, default=2,
+                        help="Minimum contained instances needed to remove an enclosing box (default: 2)")
+    parser.add_argument("--box-min-area-ratio", type=float, default=1.25,
+                        help="Minimum enclosing/child area ratio (default: 1.25)")
     args = parser.parse_args()
 
     try:
-        brand_prompts = _parse_brand_specs(args.brand)
-    except ValueError as exc:
+        task = get_detector(args.detector)
+    except KeyError as exc:
         parser.error(str(exc))
 
-    if brand_prompts:
+    if args.prompt is not None:
         input_values = args.items
-        prompt = None
+        prompt = args.prompt
     else:
         if len(args.items) < 2:
             parser.error(
-                "legacy mode requires at least one image and a final prompt; "
-                "or use --brand LABEL=PROMPT"
+                "provide a text prompt as the final positional argument or via --prompt"
             )
         input_values = args.items[:-1]
         prompt = args.items[-1]
@@ -911,6 +613,18 @@ def main() -> None:
     except Exception as exc:
         parser.error(f"could not initialize SAM3: {exc}")
 
+    options = DetectionOptions(
+        prompt=prompt,
+        filter_prompt=args.filter_prompt,
+        filter_center=args.filter_center,
+        filter_iou=args.filter_iou,
+        box_cleanup=not args.no_box_cleanup,
+        box_duplicate_iou=args.box_duplicate_iou,
+        box_min_children=args.box_min_children,
+        box_min_area_ratio=args.box_min_area_ratio,
+    )
+    effective_prompt = task.resolve_prompt(options)
+
     output_dir = Path(args.out).expanduser().resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -931,84 +645,44 @@ def main() -> None:
 
             print(f"Processing: {_display_name(value)}")
             try:
-                if brand_prompts:
-                    result = counter.infer_brands(
-                        image_path.resolve(),
-                        brand_prompts,
-                        filter_prompt=args.filter_prompt,
-                        filter_center=args.filter_center,
-                        filter_iou=args.filter_iou,
-                        box_cleanup=not args.no_box_cleanup,
-                        box_duplicate_iou=args.box_duplicate_iou,
-                        box_min_children=args.box_min_children,
-                        box_min_area_ratio=args.box_min_area_ratio,
-                    )
-                else:
-                    result = counter.infer(
-                        image_path.resolve(),
-                        prompt,
-                        filter_prompt=args.filter_prompt,
-                        filter_center=args.filter_center,
-                        filter_iou=args.filter_iou,
-                        box_cleanup=not args.no_box_cleanup,
-                        box_duplicate_iou=args.box_duplicate_iou,
-                        box_min_children=args.box_min_children,
-                        box_min_area_ratio=args.box_min_area_ratio,
-                    )
+                result = task.run(counter, image_path.resolve(), options)
             except Exception as exc:
                 print(f"  Error: {exc}", file=sys.stderr)
                 continue
 
             source_stem = Path(_display_name(value)).stem
-            output_stem = _slugify(
-                f"{source_stem}__brands" if brand_prompts else f"{source_stem}__{prompt}"
-            )
+            output_stem = _slugify(f"{source_stem}__{effective_prompt}")
             json_path = _next_output_path(output_dir, output_stem, ".json")
             image_output_path = json_path.with_suffix(".jpg")
             payload = {
                 "image_path": str(image_path.resolve()),
+                "detector": task.name,
+                "prompt": effective_prompt,
                 "threshold": args.threshold,
                 **result,
             }
-            if brand_prompts:
-                payload["brand_prompts"] = brand_prompts
-            else:
-                payload["prompt"] = prompt
             import json
 
             json_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
-            if brand_prompts:
-                visualization = annotate_brands(image_path, result["brands"])
-            else:
-                visualization = annotate(image_path, prompt, result["boxes"], result["scores"])
+
+            visualization = annotate(
+                image_path, effective_prompt, result["boxes"], result["scores"]
+            )
             visualization.save(image_output_path, quality=95)
 
-            if brand_prompts:
-                print(f"  Brands: {result['brand_count']}")
-                print(f"  Total brand detections: {result['total_count']}")
-                for label, brand in result["brands"].items():
-                    print(f"    {label}: {brand['count']} ({brand['prompt']})")
-                    if "raw_count" in brand:
-                        print(
-                            f"      model boxes: {brand['raw_count']}, "
-                            f"after cleanup: {brand['deduplicated_count']}, "
-                            f"redundant removed: {brand['redundant_box_count']}"
-                        )
-                if "filtered_count" in result:
-                    print(
-                        f"  Filter objects: {result['filter_object_count']}; "
-                        f"target boxes removed: {result['filtered_count']}"
-                    )
-            else:
-                print(f"  Count: {result['count']}")
-                print(f"  Boxes: {len(result['boxes'])}")
-                if "raw_count" in result:
-                    print(f"  (model boxes: {result['raw_count']}, "
-                          f"after cleanup: {result['deduplicated_count']}, "
-                          f"enclosing/duplicate boxes removed: {result['redundant_box_count']})")
-                if "filtered_count" in result:
-                    print(f"  (filter boxes: {result['filter_object_count']}, "
-                          f"target boxes removed by filter: {result['filtered_count']})")
+            print(f"  Count: {result['count']}")
+            print(f"  Boxes: {len(result['boxes'])}")
+            if "raw_count" in result:
+                print(
+                    f"  (model boxes: {result['raw_count']}, after cleanup: "
+                    f"{result['deduplicated_count']}, enclosing/duplicate boxes removed: "
+                    f"{result['redundant_box_count']})"
+                )
+            if "filtered_count" in result:
+                print(
+                    f"  (filter boxes: {result['filter_object_count']}, "
+                    f"target boxes removed by filter: {result['filtered_count']})"
+                )
             print(f"  Inference time: {result['inference_time_seconds']:.2f}s")
             if result["peak_vram_mb"] is not None:
                 print(f"  Peak VRAM allocated: {result['peak_vram_mb']:.1f} MiB")

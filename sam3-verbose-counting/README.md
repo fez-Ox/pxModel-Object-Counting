@@ -78,18 +78,19 @@ uv run python infer.py \
 Useful options:
 
 ```text
---threshold 0.5       Detection confidence threshold
---out results/        Output directory
---device cuda         Inference device
---no-amp              Disable CUDA mixed precision
---show                Display visualizations
---brand NAME=PROMPT   Localize one brand; repeat for each brand
---filter-prompt P     Exclude targets overlapping a second detection (e.g. "faces of people")
---no-filter-center    Don't drop a target whose center is inside a filter box
---filter-iou 0.3      Also drop targets whose IoU with a filter box reaches 0.3
---no-box-cleanup      Keep duplicate and multi-instance enclosing boxes
+--detector sunglasses  Which detection task to run (default: sunglasses)
+--prompt P             Text prompt (overrides the detector default / trailing positional prompt)
+--threshold 0.5        Detection confidence threshold
+--out results/         Output directory
+--device cuda          Inference device
+--no-amp               Disable CUDA mixed precision
+--show                 Display visualizations
+--filter-prompt P      Exclude targets overlapping a second detection (e.g. "faces of people")
+--no-filter-center     Don't drop a target whose center is inside a filter box
+--filter-iou 0.3       Also drop targets whose IoU with a filter box reaches 0.3
+--no-box-cleanup       Keep duplicate and multi-instance enclosing boxes
 --box-duplicate-iou 0.9  IoU threshold for duplicate-box suppression
---box-min-children 2  Child detections required to remove an enclosing box
+--box-min-children 2   Child detections required to remove an enclosing box
 --box-min-area-ratio 1.25  Minimum enclosing/child area ratio
 ```
 
@@ -127,40 +128,49 @@ separate box for each object. Cleanup is enabled by default: near-identical
 boxes are reduced to the highest-scoring box, and an enclosing box is removed
 when it contains at least two smaller detections. The result keeps
 `raw_boxes` / `raw_scores` / `raw_count`, plus `deduplicated_count` and
-`redundant_box_count`, so brand-level localization can be inspected against
-the original model output. Tune the thresholds with the `--box-*` options or
-disable this behavior with `--no-box-cleanup`.
+`redundant_box_count`, so the cleanup decision can be compared against the raw
+model output. Tune the thresholds with the `--box-*` options or disable this
+behavior with `--no-box-cleanup`.
 
-### Per-brand localization
+### Detection tasks (decoupled)
 
-Use one `--brand NAME=PROMPT` option per brand. The image backbone is encoded
-once and reused for all brand prompts. The output JSON contains a `brands`
-mapping with separate `count`, `boxes`, `scores`, and cleanup/filter audit
-fields for every label; the annotated JPG uses a different color for each
-brand.
+Detection logic is split from the SAM3 counting core. The core
+(`infer.Sam3VerboseCounter`) is detection-agnostic; each concrete detection is
+a *task* under `detectors/` and is **completely decoupled** from every other
+task. Today the only registered task is **sunglasses**: count pairs of
+sunglasses displayed on a retail rack while excluding pairs worn on people
+(`--detector sunglasses`, the default).
 
 ```bash
 uv run python infer.py image.jpg \
-  --brand "Ray-Ban=Ray-Ban sunglasses displayed on the retail rack" \
-  --brand "Oakley=Oakley sunglasses displayed on the retail rack"
+  --detector sunglasses \
+  --prompt "all pairs of black sunglasses displayed on the retail rack"
 ```
 
-The same API is available from Python:
+Or rely on the detector defaults and the trailing-positional prompt:
+
+```bash
+uv run python infer.py image.jpg "all pairs of black sunglasses displayed on the retail rack"
+```
+
+Library API:
 
 ```python
 from infer import build_counter
+from detectors import get_detector, DetectionOptions
 
-counter = build_counter(threshold=0.5)
-result = counter.infer_brands(
-    image_path,
-    {
-        "Ray-Ban": "Ray-Ban sunglasses displayed on the retail rack",
-        "Oakley": "Oakley sunglasses displayed on the retail rack",
-    },
-)
-print(result["total_count"])
-print(result["brands"]["Ray-Ban"]["boxes"])
+counter = build_counter(threshold=0.5)      # loads sam3.pt on cuda (or cpu)
+sunglasses = get_detector("sunglasses")      # decoupled detection task
+result = sunglasses.run(counter, image_path, DetectionOptions())
+print(result["count"])
 ```
+
+To add a future detection, drop a new module under `detectors/` that subclasses
+`detectors.base.DetectionTask` (declare `name`, `default_prompt`, and a `run`
+method) and register it with `@detectors.register`. No code in the sunglasses
+task — or any other task — needs to change. The new task automatically becomes
+available through `get_detector(...)` and `--detector <name>`, and shows up in
+`--help`.
 
 Each image produces a JSON file and annotated JPG containing:
 
