@@ -177,7 +177,27 @@ class Florence2OCRBackend:
         if self._model is not None and self._processor is not None:
             return
         import torch
-        from transformers import AutoModelForCausalLM, AutoProcessor
+        import transformers.utils.import_utils
+        import transformers.dynamic_module_utils
+        from transformers import AutoModelForCausalLM, AutoProcessor, PretrainedConfig
+
+        # Patch 1: forced_bos_token_id compatibility for transformers >= 4.45
+        if not hasattr(PretrainedConfig, "forced_bos_token_id"):
+            setattr(PretrainedConfig, "forced_bos_token_id", None)
+
+        # Patch 2: flash_attn availability check override
+        transformers.utils.import_utils.is_flash_attn_2_available = lambda *args, **kwargs: False
+
+        # Patch 3: dynamic check_imports override to prevent flash_attn requirement crash
+        orig_check_imports = transformers.dynamic_module_utils.check_imports
+        def patched_check_imports(filename):
+            try:
+                return orig_check_imports(filename)
+            except ImportError as exc:
+                if "flash_attn" in str(exc):
+                    return []
+                raise
+        transformers.dynamic_module_utils.check_imports = patched_check_imports
 
         device_str = self.device
         if device_str is None:
@@ -206,7 +226,9 @@ class Florence2OCRBackend:
     def detect(self, image: Any) -> list[TextDetection]:
         try:
             self._ensure_loaded()
-        except Exception:
+        except Exception as exc:
+            import sys
+            print(f"WARNING Florence2 load error: {exc}", file=sys.stderr)
             return []
 
         import torch
