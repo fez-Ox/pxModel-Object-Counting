@@ -517,6 +517,30 @@ class Florence2OCRBackend:
         import transformers.dynamic_module_utils
         from transformers import AutoModelForCausalLM, AutoProcessor, PretrainedConfig
 
+        # Some Kaggle transformer images expose a RobertaTokenizer variant
+        # without the legacy Florence-2 `additional_special_tokens` property.
+        # The remote processor accesses it while registering <loc_*> tokens.
+        # Restore the compatible property before AutoProcessor construction;
+        # this is a tokenizer API shim, not a model/brand change.
+        try:
+            from transformers.tokenization_utils_base import PreTrainedTokenizerBase
+
+            if not hasattr(PreTrainedTokenizerBase, "additional_special_tokens"):
+                PreTrainedTokenizerBase.additional_special_tokens = property(
+                    lambda tokenizer: getattr(tokenizer, "_additional_special_tokens", []),
+                    lambda tokenizer, value: setattr(tokenizer, "_additional_special_tokens", list(value)),
+                )
+            if not hasattr(PreTrainedTokenizerBase, "additional_special_tokens_ids"):
+                PreTrainedTokenizerBase.additional_special_tokens_ids = property(
+                    lambda tokenizer: tokenizer.convert_tokens_to_ids(
+                        tokenizer.additional_special_tokens
+                    )
+                )
+        except Exception:
+            # Older transformers versions already provide the properties; a
+            # failed compatibility probe should not prevent normal loading.
+            pass
+
         # Patch 1: forced_bos_token_id compatibility for transformers >= 4.45
         if not hasattr(PretrainedConfig, "forced_bos_token_id"):
             setattr(PretrainedConfig, "forced_bos_token_id", None)
