@@ -237,6 +237,47 @@ def _status(kaggle: list[str], kernel_id: str) -> tuple[int, str]:
     return process.returncode, (process.stdout + process.stderr).strip()
 
 
+def _delete_kernel(kaggle: list[str], kernel_id: str) -> str:
+    """Cancel and delete the remote worker so a timeout cannot burn quota."""
+    process = _run([*kaggle, "kernels", "delete", "-y", kernel_id])
+    message = (process.stdout + process.stderr).strip()
+    if process.returncode != 0:
+        return f"delete failed: {message}"
+    return message or "delete requested"
+
+
+def _cleanup_after_abort(
+    kaggle: list[str],
+    kernel_id: str,
+    *,
+    reason: str,
+    grace_seconds: int,
+) -> None:
+    print(f"Remote cleanup ({reason}): {_delete_kernel(kaggle, kernel_id)}", flush=True)
+    deadline = time.monotonic() + max(0, grace_seconds)
+    last_status = ""
+    while time.monotonic() < deadline:
+        rc, status = _status(kaggle, kernel_id)
+        if status != last_status:
+            print(f"[cleanup] {status}", flush=True)
+            last_status = status
+        lowered = status.lower()
+        # A deleted private kernel commonly returns permission/not-found here;
+        # that is a successful quota cleanup, not a second failure.
+        if rc != 0 or any(word in lowered for word in (
+            "complete",
+            "cancel_acknowledged",
+            "cancelled",
+            "error",
+            "failed",
+            "not found",
+            "denied",
+        )):
+            return
+        time.sleep(3)
+    print("WARNING: remote cleanup grace period expired; verify kernel status manually.", flush=True)
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--kernel-id", default=None, help="Override the metadata kernel id")
@@ -244,6 +285,12 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--output", type=Path, default=OUTPUT_DIR)
     parser.add_argument("--wait-timeout", type=int, default=1800)
     parser.add_argument("--poll-seconds", type=int, default=15)
+    parser.add_argument(
+        "--cleanup-grace-seconds",
+        type=int,
+        default=45,
+        help="After timeout/cancel, wait this long after deleting the kernel",
+    )
     parser.add_argument("--skip-remote-head-check", action="store_true")
     args = parser.parse_args(argv)
 
@@ -281,24 +328,43 @@ def main(argv: list[str] | None = None) -> int:
     finally:
         temporary.cleanup()
 
+    if args.wait_timeout <= 0:
+        raise ValueError("--wait-timeout must be positive")
     print("Waiting for cloud GPU execution...")
     started = time.monotonic()
     last_status = ""
-    while time.monotonic() - started < args.wait_timeout:
-        rc, status = _status(kaggle, kernel_id)
-        if status != last_status:
-            print(f"[{int(time.monotonic() - started)}s] {status}")
-            last_status = status
-        if rc != 0:
-            raise RuntimeError(f"Kaggle status failed: {status}")
-        lowered = status.lower()
-        if "complete" in lowered:
-            break
-        if any(word in lowered for word in ("error", "failed")):
-            raise RuntimeError(f"Kaggle execution failed: {status}")
-        time.sleep(max(1, args.poll_seconds))
-    else:
-        raise TimeoutError(f"Kaggle kernel did not finish within {args.wait_timeout}s.")
+    try:
+        while time.monotonic() - started < args.wait_timeout:
+            rc, status = _status(kaggle, kernel_id)
+            if status != last_status:
+                print(f"[{int(time.monotonic() - started)}s] {status}", flush=True)
+                last_status = status
+            if rc != 0:
+                raise RuntimeError(f"Kaggle status failed: {status}")
+            lowered = status.lower()
+            if "complete" in lowered:
+                break
+            if any(word in lowered for word in ("cancel", "stopped", "aborted", "error", "failed")):
+                raise RuntimeError(f"Kaggle execution terminated: {status}")
+            time.sleep(max(1, args.poll_seconds))
+        else:
+            raise TimeoutError(f"Kaggle kernel did not finish within {args.wait_timeout}s.")
+    except (TimeoutError, KeyboardInterrupt) as exc:
+        _cleanup_after_abort(
+            kaggle,
+            kernel_id,
+            reason="timeout" if isinstance(exc, TimeoutError) else "interrupt",
+            grace_seconds=args.cleanup_grace_seconds,
+        )
+        raise
+    except RuntimeError:
+        _cleanup_after_abort(
+            kaggle,
+            kernel_id,
+            reason="remote termination/error",
+            grace_seconds=args.cleanup_grace_seconds,
+        )
+        raise
 
     args.output.mkdir(parents=True, exist_ok=True)
     output = _run([*kaggle, "kernels", "output", kernel_id, "-p", str(args.output)])
