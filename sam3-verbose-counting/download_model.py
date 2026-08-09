@@ -46,10 +46,29 @@ def download_model(
         return output
 
     output.parent.mkdir(parents=True, exist_ok=True)
+    token = _get_token(token)
+
+    try:
+        from huggingface_hub import hf_hub_download
+
+        print(f"Downloading SAM3 checkpoint via hf_hub_download...")
+        downloaded_path = hf_hub_download(
+            repo_id="facebook/sam3",
+            filename="sam3.pt",
+            token=token,
+            local_dir=str(output.parent),
+        )
+        downloaded = Path(downloaded_path)
+        if downloaded != output and downloaded.exists():
+            shutil.move(str(downloaded), str(output))
+        print(f"Done: {output}")
+        return output
+    except Exception as exc:
+        print(f"hf_hub_download failed ({exc}), trying direct urllib...")
+
     temporary = output.with_name(output.name + ".part")
     temporary.unlink(missing_ok=True)
     headers = {"User-Agent": "sam3-verbose-counting/1.0"}
-    token = _get_token(token)
     if token:
         headers["Authorization"] = f"Bearer {token}"
     request = urllib.request.Request(url, headers=headers)
@@ -59,22 +78,22 @@ def download_model(
     try:
         with urllib.request.urlopen(request, timeout=timeout) as response, temporary.open("wb") as stream:
             total = int(response.headers.get("Content-Length") or 0)
-            downloaded = 0
+            downloaded_bytes = 0
             while True:
                 chunk = response.read(1024 * 1024)
                 if not chunk:
                     break
                 stream.write(chunk)
-                downloaded += len(chunk)
+                downloaded_bytes += len(chunk)
                 if total:
-                    percent = downloaded * 100 / total
+                    percent = downloaded_bytes * 100 / total
                     print(
-                        f"\r{downloaded / (1024 ** 2):.1f} / "
+                        f"\r{downloaded_bytes / (1024 ** 2):.1f} / "
                         f"{total / (1024 ** 2):.1f} MiB ({percent:.1f}%)",
                         end="",
                     )
                 else:
-                    print(f"\r{downloaded / (1024 ** 2):.1f} MiB", end="")
+                    print(f"\r{downloaded_bytes / (1024 ** 2):.1f} MiB", end="")
             print()
         shutil.move(str(temporary), str(output))
     except urllib.error.HTTPError as exc:
