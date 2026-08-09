@@ -581,9 +581,16 @@ class Florence2OCRBackend:
             trust_remote_code=True,
         ).to(device_str)
         # Transformers generation may query this capability on newer model
-        # base classes, while Florence-2's remote class predates the field.
-        if not hasattr(self._model, "_supports_sdpa"):
-            self._model._supports_sdpa = False
+        # base classes. Florence-2's remote class exposes it as a property in
+        # some revisions, so override the class attribute rather than writing
+        # through a potentially read-only instance property.
+        try:
+            setattr(type(self._model), "_supports_sdpa", False)
+            language_model = getattr(self._model, "language_model", None)
+            if language_model is not None:
+                setattr(language_model, "_supports_sdpa", False)
+        except Exception:
+            pass
         self.actual_device = device_str
 
     @staticmethod
