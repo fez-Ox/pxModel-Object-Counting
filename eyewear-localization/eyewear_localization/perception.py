@@ -570,6 +570,10 @@ class Florence2OCRBackend:
             torch_dtype=torch_dtype,
             trust_remote_code=True,
         ).to(device_str)
+        # Transformers generation may query this capability on newer model
+        # base classes, while Florence-2's remote class predates the field.
+        if not hasattr(self._model, "_supports_sdpa"):
+            self._model._supports_sdpa = False
         self.actual_device = device_str
 
     @staticmethod
