@@ -352,10 +352,16 @@ class TesseractOCRBackend:
         *,
         scale: float | None = None,
         tile: bool = True,
+        variant_names: set[str] | None = None,
     ) -> list[TextDetection]:
         source = self._image(image)
         source_width, source_height = source.size
-        variants = self._variants(source, scale=scale)
+        variants = [
+            item for item in self._variants(source, scale=scale)
+            if variant_names is None or item[0] in variant_names
+        ]
+        if not variants:
+            return []
         work_items: list[tuple[Any, float, float, bool]] = []
         for variant_name, variant in variants:
             work_items.append((variant, 0.0, 0.0, False))
@@ -433,7 +439,12 @@ class TesseractOCRBackend:
         scale here would make every crop needlessly large and can exhaust the
         worker when a shelf contains many instances.
         """
-        return self.detect(image, scale=1.0, tile=False)
+        return self.detect(
+            image,
+            scale=1.0,
+            tile=False,
+            variant_names={"original", "autocontrast", "threshold-160", "inverse-160"},
+        )
 
 
 def build_ocr_backend(

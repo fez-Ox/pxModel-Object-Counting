@@ -198,6 +198,44 @@ def ensure_remote_head() -> None:
         )
 
 
+def set_notebook_runtime_options(
+    notebook_path: Path,
+    *,
+    target_image: str | None = None,
+    max_images: int | None = None,
+) -> None:
+    """Patch bounded image selection in the temporary notebook copy."""
+    if target_image is None and max_images is None:
+        return
+    data = json.loads(notebook_path.read_text(encoding="utf-8"))
+    replacements = 0
+    for cell in data.get("cells", []):
+        if cell.get("cell_type") != "code":
+            continue
+        source = "".join(cell.get("source", []))
+        if target_image is not None:
+            source, count = re.subn(
+                r"(?m)^TARGET_IMAGE_NAME\s*=\s*.*$",
+                "TARGET_IMAGE_NAME = " + json.dumps(target_image),
+                source,
+            )
+            replacements += count
+        if max_images is not None:
+            if max_images < 1:
+                raise ValueError("--max-images must be positive")
+            source, count = re.subn(
+                r"(?m)^MAX_IMAGES\s*=\s*.*$",
+                f"MAX_IMAGES = {int(max_images)}",
+                source,
+            )
+            replacements += count
+        cell["source"] = source.splitlines(keepends=True)
+    expected = int(target_image is not None) + int(max_images is not None)
+    if replacements < expected:
+        raise RuntimeError("Could not patch the requested notebook runtime options.")
+    notebook_path.write_text(json.dumps(data, indent=1) + "\n", encoding="utf-8")
+
+
 def set_notebook_hf_token(notebook_path: Path, token_value: str) -> None:
     """Inject a token into a temporary notebook copy, never the working tree."""
     data = json.loads(notebook_path.read_text(encoding="utf-8"))
@@ -220,12 +258,22 @@ def set_notebook_hf_token(notebook_path: Path, token_value: str) -> None:
     notebook_path.write_text(json.dumps(data, indent=1) + "\n", encoding="utf-8")
 
 
-def _push_directory(token: str) -> tempfile.TemporaryDirectory[str]:
-    """Create a minimal push directory and inject the token only there."""
+def _push_directory(
+    token: str,
+    *,
+    target_image: str | None = None,
+    max_images: int | None = None,
+) -> tempfile.TemporaryDirectory[str]:
+    """Create a minimal push directory and inject temporary options/token."""
     temporary = tempfile.TemporaryDirectory(prefix="eyewear-kaggle-push-")
     directory = Path(temporary.name)
     shutil.copy2(NOTEBOOK_FILE, directory / NOTEBOOK_FILE.name)
     shutil.copy2(METADATA_FILE, directory / METADATA_FILE.name)
+    set_notebook_runtime_options(
+        directory / NOTEBOOK_FILE.name,
+        target_image=target_image,
+        max_images=max_images,
+    )
     set_notebook_hf_token(directory / NOTEBOOK_FILE.name, token)
     if token not in (directory / NOTEBOOK_FILE.name).read_text(encoding="utf-8"):
         raise RuntimeError("HF token injection verification failed.")
@@ -291,6 +339,8 @@ def main(argv: list[str] | None = None) -> int:
         default=45,
         help="After timeout/cancel, wait this long after deleting the kernel",
     )
+    parser.add_argument("--target-image", default=None, help="Temporary notebook target image filename")
+    parser.add_argument("--max-images", type=int, default=None, help="Temporary notebook image-count limit")
     parser.add_argument("--skip-remote-head-check", action="store_true")
     args = parser.parse_args(argv)
 
@@ -318,7 +368,11 @@ def main(argv: list[str] | None = None) -> int:
         print(f"Kaggle API: authenticated; kernel={kernel_id}")
     print("HF token: available (value not printed)")
 
-    temporary = _push_directory(token)
+    temporary = _push_directory(
+        token,
+        target_image=args.target_image,
+        max_images=args.max_images,
+    )
     try:
         print("Pushing validated notebook to Kaggle...")
         pushed = _run([*kaggle, "kernels", "push", "-p", temporary.name])
