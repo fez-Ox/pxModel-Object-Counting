@@ -689,6 +689,17 @@ class Florence2OCRBackend:
             bboxes = ocr_data.get("quad_boxes", [])
 
         output: list[TextDetection] = []
+        if not (bboxes and labels and len(bboxes) == len(labels)):
+            import sys
+            print(
+                "[FLORENCE] OCR parse empty: "
+                f"answer_type={type(parsed_answer).__name__} "
+                f"keys={list(ocr_data) if isinstance(ocr_data, Mapping) else None} "
+                f"labels={len(labels)} boxes={len(bboxes)} "
+                f"raw={generated_text[:600]!r}",
+                file=sys.stderr,
+                flush=True,
+            )
         if bboxes and labels and len(bboxes) == len(labels):
             for box, text in zip(bboxes, labels):
                 text_str = str(text).strip()
