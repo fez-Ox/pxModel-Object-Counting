@@ -22,6 +22,7 @@ from eyewear_localization.perception import (
 )
 from eyewear_localization.pipeline import LocalizationPipeline
 from eyewear_localization.scene_filter import build_scene_filter
+from eyewear_localization.schemas import TextDetection
 from eyewear_localization.visualization import annotate
 
 APP_ROOT = Path(__file__).resolve().parents[1]
@@ -107,6 +108,10 @@ def build_parser() -> argparse.ArgumentParser:
         type=int,
         default=6,
         help="Maximum Florence-2 calls per image with --ocr-backend tesseract+florence2",
+    )
+    parser.add_argument(
+        "--ocr-cache-dir",
+        help="Reuse raw text_detections from a prior OCR-only JSON run",
     )
     parser.add_argument("--c1-margin", type=float, default=None, help="C1 crop margin fraction (default 0.25)")
     parser.add_argument("--c1-scales", default=None, help="C1 multi-scale OCR factors, comma-separated (default '2.0,4.0')")
@@ -226,8 +231,30 @@ def main(argv: list[str] | None = None) -> int:
         with materialize_inputs(args.items, recursive=args.recursive, timeout=args.download_timeout) as sources:
             for source in sources:
                 stem = _slug(source.source)
+                cached_text: list[TextDetection] | None = None
+                if args.ocr_cache_dir:
+                    cache_path = Path(args.ocr_cache_dir) / f"{stem}.json"
+                    if not cache_path.exists():
+                        raise FileNotFoundError(f"OCR cache is missing: {cache_path}")
+                    payload = _json.loads(cache_path.read_text(encoding="utf-8"))
+                    try:
+                        cached_text = [
+                            TextDetection(
+                                str(item["text"]),
+                                list(item["bbox"]),
+                                float(item["confidence"]),
+                                source=str(item.get("source", "ocr-cache")),
+                            )
+                            for item in payload.get("text_detections", [])
+                        ]
+                    except (KeyError, TypeError, ValueError) as exc:
+                        raise ValueError(f"Invalid OCR cache {cache_path}: {exc}") from exc
                 try:
-                    result = pipeline.run(source.path, source=source.source)
+                    result = pipeline.run(
+                        source.path,
+                        source=source.source,
+                        text_detections_override=cached_text,
+                    )
                 except Exception as exc:
                     print(f"ERROR {source.source}: {exc}", file=sys.stderr)
                     continue

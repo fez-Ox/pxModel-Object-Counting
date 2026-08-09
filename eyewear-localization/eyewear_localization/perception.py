@@ -1086,7 +1086,12 @@ class PerceptionFrontend:
         self.poster_detector = poster_detector or NullPosterBackend()
         self.scene_filter = scene_filter
 
-    def run(self, image_path: str | Path) -> PerceptionResult:
+    def run(
+        self,
+        image_path: str | Path,
+        *,
+        text_detections_override: list[TextDetection] | None = None,
+    ) -> PerceptionResult:
         image_path = Path(image_path)
         try:
             detections = self.localizer.detect(image_path)
@@ -1094,10 +1099,13 @@ class PerceptionFrontend:
             detections = []
         instances = detections_to_instances(detections)
 
-        try:
-            text_detections = self.ocr.detect(image_path)
-        except Exception:
-            text_detections = []
+        if text_detections_override is not None:
+            text_detections = list(text_detections_override)
+        else:
+            try:
+                text_detections = self.ocr.detect(image_path)
+            except Exception:
+                text_detections = []
         signs = self._matched_signs(text_detections, self.gazetteer)
 
         try:

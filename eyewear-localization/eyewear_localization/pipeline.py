@@ -44,7 +44,13 @@ class LocalizationPipeline:
         except Exception:
             return default
 
-    def run(self, image_path: str | Path, *, source: str | None = None) -> dict[str, Any]:
+    def run(
+        self,
+        image_path: str | Path,
+        *,
+        source: str | None = None,
+        text_detections_override: list[Any] | None = None,
+    ) -> dict[str, Any]:
         image_path = Path(image_path)
         # A selective OCR cascade shares one bounded stronger-model budget
         # across L0 signage and C1 product crops for this source image.
@@ -55,7 +61,10 @@ class LocalizationPipeline:
         started = time.perf_counter()
         if verbose:
             print(f"[PIPE] start image={image_path.name}", flush=True)
-        perception = self.frontend.run(image_path)
+        perception = self.frontend.run(
+            image_path,
+            text_detections_override=text_detections_override,
+        )
         if verbose:
             print(
                 f"[PIPE] L0 done instances={len(perception.instances)} "

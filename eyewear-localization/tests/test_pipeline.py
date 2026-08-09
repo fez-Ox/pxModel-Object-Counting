@@ -46,6 +46,32 @@ class SignOCR:
 
 
 class PipelineTests(unittest.TestCase):
+    def test_cached_ocr_bypasses_live_ocr_backend(self):
+        class RaisingOCR:
+            name = "raising-ocr"
+            reliability = 1.0
+
+            def detect(self, image):
+                raise AssertionError("live OCR must not run when cache is supplied")
+
+        with tempfile.TemporaryDirectory() as directory:
+            image_path = Path(directory) / "image.png"
+            Image.new("RGB", (100, 100), "white").save(image_path)
+            frontend = PerceptionFrontend(
+                localizer=NoopLocalizer(),
+                ocr=RaisingOCR(),
+                gazetteer=Gazetteer(["cartier"]),
+                poster_detector=NullPosterBackend(),
+            )
+            result = frontend.run(
+                image_path,
+                text_detections_override=[
+                    TextDetection("Cartier", [2, 2, 30, 8], 0.95, source="ocr-cache")
+                ],
+            )
+
+        self.assertEqual([sign.brand for sign in result.signs], ["cartier"])
+
     def test_sign_aggregation_rejects_broad_lines_and_keeps_separate_labels(self):
         with tempfile.TemporaryDirectory() as directory:
             image_path = Path(directory) / "image.png"

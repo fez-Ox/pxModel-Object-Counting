@@ -68,7 +68,15 @@ It runs Tesseract first, then performs one Florence-2 scene pass so a match for
 one bay cannot hide a missed sibling brand. Remaining budget is available for
 unmatched C1 crops; C1 runs Tesseract at all configured scales before spending
 at most one Florence-2 call on an unmatched instance. Florence output remains
-OCR evidence and is still closed-set gazetteer-gated.
+OCR evidence and is still closed-set gazetteer-gated. For a sequential Kaggle
+workflow, save the OCR JSON first and reuse it while SAM3 runs:
+
+```bash
+uv run python infer.py image.jpg --ocr-backend tesseract+florence2 \
+  --out ocr-cache --no-visualization
+uv run python infer.py image.jpg --sam3-checkpoint ../sam3-verbose-counting/checkpoints/sam3.pt \
+  --ocr-backend tesseract --ocr-cache-dir ocr-cache --out outputs
+```
 
 The JSON contains:
 
