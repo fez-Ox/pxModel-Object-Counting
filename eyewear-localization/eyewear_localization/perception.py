@@ -139,6 +139,242 @@ class EasyOCRBackend:
         return output
 
 
+class RapidOCRBackend:
+    """PP-OCR detector/recognizer through the lightweight ONNX runtime.
+
+    RapidOCR ships PP-OCR models without requiring PaddlePaddle or changing
+    Kaggle's CUDA/Torch installation. It is used as an independent comparison
+    backend and can be paired with Florence-2 in the bounded cascade.
+    """
+
+    name = "rapidocr"
+    reliability = 0.9
+
+    def __init__(self, *, scale: float = 2.0, max_dimension: int = 4200) -> None:
+        from rapidocr_onnxruntime import RapidOCR
+
+        self.scale = max(1.0, float(scale))
+        self.max_dimension = max(512, int(max_dimension))
+        self.engine = RapidOCR()
+
+    @staticmethod
+    def _image(value: Any):
+        from PIL import Image
+
+        if isinstance(value, (str, Path)):
+            with Image.open(value) as image:
+                return image.convert("RGB")
+        if isinstance(value, Image.Image):
+            return value.convert("RGB")
+        return Image.fromarray(value).convert("RGB")
+
+    @staticmethod
+    def _box(points: Any) -> list[float] | None:
+        try:
+            values = list(points)
+            if values and isinstance(values[0], (list, tuple)):
+                xs = [float(point[0]) for point in values]
+                ys = [float(point[1]) for point in values]
+            else:
+                flat = [float(value) for value in values]
+                xs, ys = flat[0::2], flat[1::2]
+            if len(xs) < 2 or len(ys) < 2:
+                return None
+            return [min(xs), min(ys), max(xs) - min(xs), max(ys) - min(ys)]
+        except (TypeError, ValueError, IndexError):
+            return None
+
+    def detect(self, image: Any) -> list[TextDetection]:
+        import numpy as np
+
+        source = self._image(image)
+        source_width, source_height = source.size
+        working = source.resize(
+            (max(1, round(source_width * self.scale)),
+             max(1, round(source_height * self.scale)))
+        ) if self.scale != 1.0 else source
+        if max(working.size) > self.max_dimension:
+            ratio = self.max_dimension / max(working.size)
+            working = working.resize(
+                (max(1, round(working.width * ratio)),
+                 max(1, round(working.height * ratio)))
+            )
+        factor_x = source_width / max(1, working.width)
+        factor_y = source_height / max(1, working.height)
+        raw = self.engine(np.asarray(working))
+        rows = raw[0] if isinstance(raw, tuple) else raw
+        output: list[TextDetection] = []
+        for item in rows or []:
+            try:
+                polygon, text, confidence = item[0], str(item[1]).strip(), float(item[2])
+            except (TypeError, ValueError, IndexError):
+                continue
+            if not text or confidence <= 0.0:
+                continue
+            box = self._box(polygon)
+            if box is None:
+                continue
+            box = [
+                box[0] * factor_x,
+                box[1] * factor_y,
+                box[2] * factor_x,
+                box[3] * factor_y,
+            ]
+            try:
+                output.append(TextDetection(text, box, confidence, source=self.name))
+            except ValueError:
+                continue
+        return output
+
+    def detect_preprocessed(self, image: Any) -> list[TextDetection]:
+        # C1 has already upscaled the crop; do not resize it a second time.
+        original_scale = self.scale
+        try:
+            self.scale = 1.0
+            return self.detect(image)
+        finally:
+            self.scale = original_scale
+
+
+class PaddleOCRBackend:
+    """Optional PP-OCRv5/PaddleOCR adapter for high-accuracy comparison.
+
+    PaddleOCR is deliberately optional because PaddlePaddle wheels are tied
+    to the worker Python/CUDA version. If unavailable, the caller receives an
+    explicit empty adapter rather than changing the Torch runtime.
+    """
+
+    name = "paddleocr"
+    reliability = 0.95
+
+    def __init__(self, *, scale: float = 2.0, device: str = "cpu", max_dimension: int = 4200) -> None:
+        from paddleocr import PaddleOCR
+
+        self.scale = max(1.0, float(scale))
+        self.max_dimension = max(512, int(max_dimension))
+        try:
+            self.engine = PaddleOCR(
+                lang="en",
+                device=device,
+                use_doc_orientation_classify=False,
+                use_doc_unwarping=False,
+                use_textline_orientation=False,
+            )
+        except TypeError:
+            # PaddleOCR 2.x compatibility.
+            self.engine = PaddleOCR(lang="en", use_angle_cls=False, use_gpu=False, show_log=False)
+
+    @staticmethod
+    def _image(value: Any):
+        from PIL import Image
+
+        if isinstance(value, (str, Path)):
+            with Image.open(value) as image:
+                return image.convert("RGB")
+        if isinstance(value, Image.Image):
+            return value.convert("RGB")
+        return Image.fromarray(value).convert("RGB")
+
+    @staticmethod
+    def _payload(value: Any) -> Mapping[str, Any] | None:
+        import json
+
+        if isinstance(value, Mapping):
+            payload: Any = value
+        else:
+            payload = None
+            for attr in ("json", "to_dict"):
+                candidate = getattr(value, attr, None)
+                if callable(candidate):
+                    candidate = candidate()
+                if isinstance(candidate, str):
+                    try:
+                        candidate = json.loads(candidate)
+                    except ValueError:
+                        candidate = None
+                if isinstance(candidate, Mapping):
+                    payload = candidate
+                    break
+        if not isinstance(payload, Mapping):
+            return None
+        nested = payload.get("res")
+        return nested if isinstance(nested, Mapping) else payload
+
+    @staticmethod
+    def _box(points: Any) -> list[float] | None:
+        return RapidOCRBackend._box(points)
+
+    def _rows(self, raw: Any) -> Iterable[tuple[Any, str, float]]:
+        # PaddleOCR 3.x returns Result objects with rec_polys/rec_texts;
+        # PaddleOCR 2.x returns [[polygon, (text, score)], ...].
+        values = list(raw) if not isinstance(raw, (str, bytes)) else []
+        for result in values:
+            payload = self._payload(result)
+            if payload is not None:
+                boxes = payload.get("rec_polys", payload.get("dt_polys", payload.get("rec_boxes", [])))
+                texts = payload.get("rec_texts", payload.get("texts", []))
+                scores = payload.get("rec_scores", payload.get("scores", []))
+                for box, text, score in zip(boxes or [], texts or [], scores or []):
+                    try:
+                        yield box, str(text).strip(), float(score)
+                    except (TypeError, ValueError):
+                        continue
+                continue
+            if isinstance(result, (list, tuple)):
+                for item in result:
+                    if not isinstance(item, (list, tuple)) or len(item) < 2:
+                        continue
+                    try:
+                        text, score = item[1][0], float(item[1][1])
+                    except (TypeError, ValueError, IndexError):
+                        continue
+                    yield item[0], str(text).strip(), score
+
+    def detect(self, image: Any) -> list[TextDetection]:
+        import numpy as np
+
+        source = self._image(image)
+        source_width, source_height = source.size
+        working = source.resize(
+            (max(1, round(source_width * self.scale)),
+             max(1, round(source_height * self.scale)))
+        ) if self.scale != 1.0 else source
+        if max(working.size) > self.max_dimension:
+            ratio = self.max_dimension / max(working.size)
+            working = working.resize(
+                (max(1, round(working.width * ratio)),
+                 max(1, round(working.height * ratio)))
+            )
+        factor_x = source_width / max(1, working.width)
+        factor_y = source_height / max(1, working.height)
+        array = np.asarray(working)
+        if hasattr(self.engine, "predict"):
+            raw = self.engine.predict(array)
+        else:
+            raw = self.engine.ocr(array, cls=False)
+        output: list[TextDetection] = []
+        for polygon, text, confidence in self._rows(raw):
+            if not text or confidence <= 0.0:
+                continue
+            box = self._box(polygon)
+            if box is None:
+                continue
+            box = [box[0] * factor_x, box[1] * factor_y, box[2] * factor_x, box[3] * factor_y]
+            try:
+                output.append(TextDetection(text, box, confidence, source=self.name))
+            except ValueError:
+                continue
+        return output
+
+    def detect_preprocessed(self, image: Any) -> list[TextDetection]:
+        original_scale = self.scale
+        try:
+            self.scale = 1.0
+            return self.detect(image)
+        finally:
+            self.scale = original_scale
+
+
 class TesseractOCRBackend:
     """Local OCR fallback that returns word boxes from the Tesseract CLI.
 
@@ -462,12 +698,47 @@ def build_ocr_backend(
             return TesseractOCRBackend(scale=scale)
         except Exception as exc:
             return NullOCRBackend(f"Tesseract unavailable: {exc}")
+    if name == "rapidocr":
+        try:
+            return RapidOCRBackend(scale=scale)
+        except Exception as exc:
+            return NullOCRBackend(f"RapidOCR unavailable: {exc}")
+    if name == "paddleocr":
+        try:
+            return PaddleOCRBackend(scale=scale, device="cuda" if gpu is True or gpu == "cuda" else "cpu")
+        except Exception as exc:
+            return NullOCRBackend(f"PaddleOCR unavailable: {exc}")
     if name == "florence2":
         try:
             device = "cuda" if gpu is True or gpu == "cuda" else (gpu if isinstance(gpu, str) else None)
             return Florence2OCRBackend(device=device, scale=scale)
         except Exception as exc:
             return NullOCRBackend(f"Florence2 unavailable: {exc}")
+    if name in {"tesseract+rapidocr", "rapidocr+florence2", "paddleocr+florence2", "easyocr+florence2"}:
+        if gazetteer is None:
+            return NullOCRBackend(f"{name} requires a gazetteer")
+        try:
+            device = "cuda" if gpu is True or gpu == "cuda" else (gpu if isinstance(gpu, str) else None)
+            if name == "tesseract+rapidocr":
+                primary = TesseractOCRBackend(scale=scale)
+                fallback = RapidOCRBackend(scale=scale)
+            elif name == "rapidocr+florence2":
+                primary = RapidOCRBackend(scale=scale)
+                fallback = Florence2OCRBackend(device=device, scale=scale)
+            elif name == "paddleocr+florence2":
+                primary = PaddleOCRBackend(scale=scale, device="cuda" if gpu is True or gpu == "cuda" else "cpu")
+                fallback = Florence2OCRBackend(device=device, scale=scale)
+            else:
+                primary = EasyOCRBackend(gpu=gpu, scale=scale)
+                fallback = Florence2OCRBackend(device=device, scale=scale)
+            return SelectiveOCRBackend(
+                primary,
+                fallback,
+                gazetteer,
+                max_fallback_calls=fallback_budget,
+            )
+        except Exception as exc:
+            return NullOCRBackend(f"{name} unavailable: {exc}")
     if name == "tesseract+florence2":
         if gazetteer is None:
             return NullOCRBackend("tesseract+florence2 requires a gazetteer")
@@ -710,7 +981,7 @@ class Florence2OCRBackend:
             )
         if bboxes and labels and len(bboxes) == len(labels):
             for box, text in zip(bboxes, labels):
-                text_str = str(text).strip()
+                text_str = str(text).replace("<s>", "").replace("</s>", "").strip()
                 if not text_str:
                     continue
                 try:

@@ -18,6 +18,10 @@ dependencies = [
 ocr = [
   "easyocr>=1.7.2",
 ]
+ocr-high-accuracy = [
+  "easyocr>=1.7.2",
+  "rapidocr-onnxruntime>=1.2.3",
+]
 florence2 = [
   "torch>=2.0.0",
   "transformers>=4.40.0",

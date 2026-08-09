@@ -100,7 +100,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--ocr-backend",
         default="easyocr",
-        choices=("easyocr", "florence2", "tesseract", "tesseract+florence2", "none"),
+        choices=(
+            "easyocr", "florence2", "tesseract", "rapidocr", "paddleocr",
+            "tesseract+florence2", "tesseract+rapidocr", "rapidocr+florence2",
+            "paddleocr+florence2", "easyocr+florence2", "none",
+        ),
     )
     parser.add_argument("--ocr-scale", type=float, default=2.0, help="OCR upscale factor (whole-image)")
     parser.add_argument(

@@ -12,7 +12,7 @@ Milestone 1 and the initial L0/C1 implementation are available:
 - Local path, folder, recursive-folder, and URL input handling.
 - Class-agnostic SAM3 adapter using only `sunglasses`, `eyeglasses`,
   `glasses`, and `rimless glasses` prompts.
-- Independent EasyOCR, Tesseract, and zero-shot Florence-2 OCR adapters.
+- Independent EasyOCR, Tesseract, RapidOCR (PP-OCR ONNX), and zero-shot Florence-2 OCR adapters.
 - Gazetteer matching with normalization, token containment, and edit distance ≤ 1.
 - C1 per-instance crop OCR and C2 geometry-based signage scope hypotheses.
 - Reliability-weighted fusion, `unknown` abstention, and gated C3 smoothing.
@@ -27,7 +27,7 @@ explicit next milestones.
 
 ```bash
 cd eyewear-localization
-uv sync --extra ocr --extra sam3
+uv sync --extra ocr-high-accuracy --extra sam3
 ```
 
 EasyOCR downloads its own recognition models on first use. The `sam3` extra
@@ -60,7 +60,7 @@ For a Kaggle GPU run, use the bounded selective cascade rather than applying
 Florence-2 to every crop:
 
 ```bash
-uv run python infer.py image.jpg --ocr-backend tesseract+florence2 \
+uv run python infer.py image.jpg --ocr-backend rapidocr+florence2 \
   --ocr-fallback-budget 6
 ```
 

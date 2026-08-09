@@ -27,6 +27,17 @@ def _compact(value: str) -> str:
     return normalize_text(value).replace(" ", "")
 
 
+# Florence-2/PP-OCR commonly render the stylized Oakley wordmark as one of
+# these exact strings. They are closed-set aliases: they can only resolve to
+# ``oakley`` when that configured gazetteer label is present, and the raw OCR
+# string remains in the evidence for auditability.
+_CLOSED_SET_OCR_ALIASES = {
+    "darky": "oakley",
+    "darley": "oakley",
+    "darly": "oakley",
+}
+
+
 def _edit_distance(left: str, right: str) -> int:
     if len(left) < len(right):
         left, right = right, left
@@ -71,6 +82,10 @@ class Gazetteer:
             brand_compact = self._compact[brand]
             if compact == brand_compact:
                 return GazetteerMatch(brand, 1.0, "exact")
+
+        alias_brand = _CLOSED_SET_OCR_ALIASES.get(compact)
+        if alias_brand in self._brands:
+            return GazetteerMatch(alias_brand, 0.86, "closed_set_ocr_alias")
 
         # Token containment handles strings such as "RAY BAN EYEWEAR" while
         # keeping the gazetteer in control of which labels may be emitted. It
