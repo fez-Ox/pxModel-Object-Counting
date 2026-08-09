@@ -517,6 +517,16 @@ class Florence2OCRBackend:
         import transformers.dynamic_module_utils
         from transformers import AutoModelForCausalLM, AutoProcessor, PretrainedConfig
 
+        # Older Kaggle transformers may query this capability while
+        # constructing the remote Florence class, before an instance exists.
+        # Set it on the base class before from_pretrained, not only after load.
+        try:
+            from transformers.modeling_utils import PreTrainedModel
+
+            PreTrainedModel._supports_sdpa = False
+        except Exception:
+            pass
+
         # Some Kaggle transformer images expose a RobertaTokenizer variant
         # without the legacy Florence-2 `additional_special_tokens` property.
         # The remote processor accesses it while registering <loc_*> tokens.
