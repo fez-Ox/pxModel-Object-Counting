@@ -1,6 +1,6 @@
 {
   "id": "faizankhan101/eyewear-localization-brand-attribution",
-  "title": "Eyewear Localization & Brand Attribution",
+  "title": "Eyewear Localization Brand Attribution",
   "code_file": "eyewear_localization_kaggle.ipynb",
   "language": "python",
   "kernel_type": "notebook",
@@ -8,7 +8,9 @@
   "enable_gpu": "true",
   "enable_tpu": "false",
   "enable_internet": "true",
-  "dataset_sources": [],
+  "dataset_sources": [
+    "faizankhan101/eyewear-test-samples"
+  ],
   "kernel_sources": [],
   "competition_sources": []
 }

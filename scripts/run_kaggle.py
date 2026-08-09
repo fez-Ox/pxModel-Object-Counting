@@ -103,9 +103,14 @@ def get_or_create_metadata() -> str:
         except Exception:
             pass
 
+    # Auto-load HF_TOKEN from ~/.kaggle/hf_token if present
+    hf_token_path = Path.home() / ".kaggle" / "hf_token"
+    if hf_token_path.exists() and "HF_TOKEN" not in os.environ:
+        os.environ["HF_TOKEN"] = hf_token_path.read_text().strip()
+
     metadata_content = {
         "id": kernel_id,
-        "title": "Eyewear Localization & Brand Attribution",
+        "title": "Eyewear Localization Brand Attribution",
         "code_file": "eyewear_localization_kaggle.ipynb",
         "language": "python",
         "kernel_type": "notebook",
@@ -113,7 +118,7 @@ def get_or_create_metadata() -> str:
         "enable_gpu": "true",
         "enable_tpu": "false",
         "enable_internet": "true",
-        "dataset_sources": [],
+        "dataset_sources": ["faizankhan101/eyewear-test-samples"],
         "kernel_sources": [],
         "competition_sources": [],
     }
@@ -124,6 +129,8 @@ def get_or_create_metadata() -> str:
 
 def main() -> None:
     print("=== Automated Kaggle Remote Execution ===")
+    print("Note: Headless batch push automatically powers off the Kaggle GPU worker container")
+    print("      as soon as notebook execution completes, protecting your GPU quota.")
     ensure_kaggle_installed()
 
     if not check_credentials():
