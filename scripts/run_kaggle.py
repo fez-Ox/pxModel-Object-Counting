@@ -29,13 +29,43 @@ def ensure_kaggle_installed() -> None:
 
 
 def check_credentials() -> bool:
-    """Verify ~/.kaggle/kaggle.json exists."""
+    """Verify or auto-create ~/.kaggle/kaggle.json."""
     cred_path = Path.home() / ".kaggle" / "kaggle.json"
+    token_path = Path.home() / ".kaggle" / "access_token"
+
     env_user = os.environ.get("KAGGLE_USERNAME")
     env_key = os.environ.get("KAGGLE_KEY")
 
     if cred_path.exists() or (env_user and env_key):
         return True
+
+    # Auto-convert access_token if present
+    if token_path.exists():
+        key = token_path.read_text().strip()
+        # Try to infer username from kernel-metadata.json or env
+        username = env_user or ""
+        if not username and METADATA_FILE.exists():
+            try:
+                meta = json.loads(METADATA_FILE.read_text())
+                parts = meta.get("id", "").split("/")
+                if len(parts) == 2 and parts[0] and parts[0] != "your-kaggle-username":
+                    username = parts[0]
+            except Exception:
+                pass
+
+        if not username:
+            username = "faizan"
+
+        if key:
+            cred_path.parent.mkdir(parents=True, exist_ok=True)
+            cred_data = {"username": username, "key": key}
+            cred_path.write_text(json.dumps(cred_data, indent=2))
+            try:
+                cred_path.chmod(0o600)
+            except Exception:
+                pass
+            print(f"Auto-configured Kaggle API credentials at {cred_path} for user '{username}'.")
+            return True
 
     print("\n" + "=" * 65)
     print("ERROR: Kaggle credentials not found!")
