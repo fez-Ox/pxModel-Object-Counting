@@ -636,11 +636,22 @@ class Florence2OCRBackend:
         # silently produce no detections for the Kaggle run.
         prompt = "<OCR_WITH_REGION>"
         inputs = self._processor(text=prompt, images=working, return_tensors="pt").to(self.actual_device)
+        pixel_values = inputs["pixel_values"]
+        if torch.is_floating_point(pixel_values):
+            # Florence's processor emits float32 pixels even when the CUDA
+            # checkpoint is loaded in float16. Match the vision tower dtype;
+            # otherwise its first convolution rejects the input/bias pair.
+            vision_tower = getattr(self._model, "vision_tower", self._model)
+            try:
+                vision_dtype = next(vision_tower.parameters()).dtype
+            except StopIteration:
+                vision_dtype = pixel_values.dtype
+            pixel_values = pixel_values.to(dtype=vision_dtype)
 
         with torch.no_grad():
             generated_ids = self._model.generate(
                 input_ids=inputs["input_ids"],
-                pixel_values=inputs["pixel_values"],
+                pixel_values=pixel_values,
                 max_new_tokens=1024,
                 num_beams=3,
                 do_sample=False,
