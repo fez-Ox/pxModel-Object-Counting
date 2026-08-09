@@ -127,6 +127,21 @@ def get_or_create_metadata() -> str:
     return kernel_id
 
 
+def set_notebook_hf_token(notebook_path: Path, token_value: str) -> None:
+    """Inject token_value into HF_TOKEN_FALLBACK in notebook JSON."""
+    data = json.loads(notebook_path.read_text())
+    for cell in data.get("cells", []):
+        if cell.get("cell_type") == "code":
+            new_source = []
+            for line in cell.get("source", []):
+                if line.startswith("HF_TOKEN_FALLBACK ="):
+                    new_source.append(f'HF_TOKEN_FALLBACK = "{token_value}"\n')
+                else:
+                    new_source.append(line)
+            cell["source"] = new_source
+    notebook_path.write_text(json.dumps(data, indent=1))
+
+
 def main() -> None:
     print("=== Automated Kaggle Remote Execution ===")
     print("Note: Headless batch push automatically powers off the Kaggle GPU worker container")
@@ -150,9 +165,8 @@ def main() -> None:
     nb_original_text = NOTEBOOK_FILE.read_text()
     try:
         if hf_token:
-            print("Injecting HF_TOKEN for gated model authentication...")
-            nb_injected = nb_original_text.replace('HF_TOKEN_FALLBACK = ""', f'HF_TOKEN_FALLBACK = "{hf_token}"')
-            NOTEBOOK_FILE.write_text(nb_injected)
+            print(f"Injecting HF_TOKEN ({hf_token[:6]}...) into notebook for push...")
+            set_notebook_hf_token(NOTEBOOK_FILE, hf_token)
 
         # Push kernel
         result = subprocess.run(
