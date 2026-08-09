@@ -82,6 +82,12 @@ class LocalizationPipeline:
         except Exception:
             pass
 
+        release_localizer = getattr(self.frontend.localizer, "release", None)
+        if callable(release_localizer):
+            if verbose:
+                print("[SAM3] releasing model before C1", flush=True)
+            self._safe(release_localizer, None)
+
         c1_started = time.perf_counter()
         c1_evidence = self._safe(
             self.c1.emit, [], image_path, perception.instances

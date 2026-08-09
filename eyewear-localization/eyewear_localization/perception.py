@@ -264,7 +264,13 @@ class TesseractOCRBackend:
                 height = float(row.get("height", "0"))
             except (TypeError, ValueError):
                 continue
-            if not value or confidence < 0 or width <= 0 or height <= 0:
+            if (
+                not value
+                or confidence <= 0.0
+                or not any(char.isalnum() for char in value)
+                or width <= 0
+                or height <= 0
+            ):
                 continue
             line_key = (
                 row.get("block_num", ""),
@@ -812,12 +818,20 @@ class SAM3Localizer:
         rimless_threshold: float = 0.35,
         duplicate_iou: float = 0.7,
         verbose: bool = False,
+        release_callback: Callable[[], None] | None = None,
     ) -> None:
         self.predictor = predictor
         self.score_threshold = float(score_threshold)
         self.rimless_threshold = float(rimless_threshold)
         self.duplicate_iou = float(duplicate_iou)
         self.verbose = bool(verbose)
+        self._release_callback = release_callback
+
+    def release(self) -> None:
+        """Release an optional native model after L0 is complete."""
+        if self._release_callback is not None:
+            self._release_callback()
+            self._release_callback = None
 
     @staticmethod
     def _as_list(value: Any) -> list[Any]:
@@ -941,7 +955,12 @@ def build_native_sam3_localizer(
                 filter_prompt=None,
             )
 
-        return SAM3Localizer(predictor, score_threshold=threshold, verbose=True)
+        return SAM3Localizer(
+            predictor,
+            score_threshold=threshold,
+            verbose=True,
+            release_callback=counter.release,
+        )
     except Exception as exc:
         return HeuristicLocalizer(f"native SAM3 unavailable: {exc}")
 

@@ -332,6 +332,20 @@ class Sam3VerboseCounter:
         self._cached_image_key: str | None = None
         self._cached_image_state: dict | None = None
 
+    def release(self) -> None:
+        """Release image features and model memory before another GPU stage."""
+        import gc
+
+        if self._cached_image_state is not None:
+            self._cached_image_state.clear()
+        self._cached_image_state = None
+        self._cached_image_key = None
+        self.processor = None
+        self.model = None
+        gc.collect()
+        if self.device.type == "cuda":
+            self.torch.cuda.empty_cache()
+
     def _image_state(self, image_path: Path):
         key = str(image_path.resolve())
         if self._cached_image_key == key and self._cached_image_state is not None:
