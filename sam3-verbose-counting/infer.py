@@ -326,6 +326,22 @@ class Sam3VerboseCounter:
             device=self.device,
             confidence_threshold=self.threshold,
         )
+        # Class-agnostic attribution asks many text prompts for the same
+        # image. Keep the expensive image backbone features until the next
+        # image arrives; text grounding remains prompt-specific.
+        self._cached_image_key: str | None = None
+        self._cached_image_state: dict | None = None
+
+    def _image_state(self, image_path: Path):
+        key = str(image_path.resolve())
+        if self._cached_image_key == key and self._cached_image_state is not None:
+            return self._cached_image_state
+        if self._cached_image_state is not None:
+            self._cached_image_state.clear()
+        state = self.processor.set_image(image_path_to_pil(image_path))
+        self._cached_image_key = key
+        self._cached_image_state = state
+        return state
 
     def _autocast(self):
         if not self.amp:
@@ -368,7 +384,7 @@ class Sam3VerboseCounter:
 
         try:
             with torch.inference_mode(), self._autocast():
-                state = self.processor.set_image(image_path_to_pil(image_path))
+                state = self._image_state(image_path)
                 state = self.processor.set_text_prompt(prompt, state)
             if is_cuda:
                 torch.cuda.synchronize(self.device)
@@ -426,8 +442,10 @@ class Sam3VerboseCounter:
         else:
             kept_boxes, kept_scores, filter_removed = target_boxes, target_scores, []
 
-        # Release image features before processing the next image.
-        state.clear()
+        # Release prompt-specific tensors while retaining image features for
+        # the next prompt on this same image. `_image_state` clears the cache
+        # when a different image arrives.
+        self.processor.reset_all_prompts(state)
 
         result = {
             "count": len(kept_boxes),
