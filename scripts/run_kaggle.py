@@ -294,13 +294,32 @@ def _delete_kernel(kaggle: list[str], kernel_id: str) -> str:
     return message or "delete requested"
 
 
+def _save_remote_logs(kaggle: list[str], kernel_id: str, output_dir: Path) -> Path | None:
+    """Persist logs before deleting an errored/timed-out kernel."""
+    output_dir.mkdir(parents=True, exist_ok=True)
+    process = _run([*kaggle, "kernels", "logs", kernel_id])
+    payload = process.stdout + process.stderr
+    if not payload.strip():
+        return None
+    path = output_dir / f"{kernel_id.rsplit('/', 1)[-1]}-remote.log"
+    path.write_text(payload, encoding="utf-8")
+    return path
+
+
 def _cleanup_after_abort(
     kaggle: list[str],
     kernel_id: str,
     *,
     reason: str,
     grace_seconds: int,
+    output_dir: Path,
 ) -> None:
+    try:
+        log_path = _save_remote_logs(kaggle, kernel_id, output_dir)
+        if log_path:
+            print(f"Saved remote logs: {log_path}", flush=True)
+    except OSError as exc:
+        print(f"WARNING: could not save remote logs: {exc}", flush=True)
     print(f"Remote cleanup ({reason}): {_delete_kernel(kaggle, kernel_id)}", flush=True)
     deadline = time.monotonic() + max(0, grace_seconds)
     last_status = ""
@@ -409,6 +428,7 @@ def main(argv: list[str] | None = None) -> int:
             kernel_id,
             reason="timeout" if isinstance(exc, TimeoutError) else "interrupt",
             grace_seconds=args.cleanup_grace_seconds,
+            output_dir=args.output,
         )
         raise
     except RuntimeError:
@@ -417,6 +437,7 @@ def main(argv: list[str] | None = None) -> int:
             kernel_id,
             reason="remote termination/error",
             grace_seconds=args.cleanup_grace_seconds,
+            output_dir=args.output,
         )
         raise
 
