@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Protocol
 
 from eyewear_localization.perception import LocalizationDetection, SAM3Localizer
-from eyewear_localization.schemas import Instance, InstanceExclusion, xywh_to_xyxy
+from eyewear_localization.schemas import Instance, InstanceExclusion, PosterRegion, xywh_to_xyxy, xyxy_to_xywh
 
 
 class SceneFilter(Protocol):
@@ -84,6 +84,7 @@ class SAM3SceneFilter:
         self.person_threshold = person_threshold
         self.poster_threshold = poster_threshold
         self.shelf_threshold = shelf_threshold
+        self.last_poster_regions: list[PosterRegion] = []
 
     def _detect(self, image_path: Path) -> dict[str, list[LocalizationDetection]]:
         prompts = {
@@ -122,6 +123,14 @@ class SAM3SceneFilter:
         self, image_path: Path, instances: list[Instance]
     ) -> tuple[list[Instance], list[InstanceExclusion]]:
         detections = self._detect(image_path)
+        self.last_poster_regions = [
+            PosterRegion(
+                xyxy_to_xywh(item.box),
+                item.score,
+                source=f"sam3:{item.prompt}",
+            )
+            for item in detections["poster"]
+        ]
         shelf_boxes = detections["shelf"]
         kept: list[Instance] = []
         excluded: list[InstanceExclusion] = []

@@ -11,7 +11,7 @@ from pathlib import Path
 from statistics import median
 from typing import Any, Callable, Protocol
 
-from eyewear_localization.gazetteer import Gazetteer
+from eyewear_localization.gazetteer import Gazetteer, normalize_text
 from eyewear_localization.schemas import Evidence, Instance, PosterRegion, Scope, Sign, TextDetection
 
 
@@ -104,8 +104,19 @@ class OnProductBrandingCue:
 
         return image.filter(ImageFilter.UnsharpMask(radius=2, percent=150, threshold=3))
 
-    def _ocr_at_scale(self, crop: Any, scale: float) -> list[TextDetection]:
-        """Upscale, optionally sharpen, and run OCR at one scale."""
+    def _ocr_at_scale(
+        self,
+        crop: Any,
+        scale: float,
+        *,
+        method: str | None = None,
+    ) -> list[TextDetection]:
+        """Upscale, optionally sharpen, and run OCR at one scale.
+
+        ``method`` lets a bounded cascade run its inexpensive backend across
+        all scales before it spends a stronger-model call on the best scale.
+        Ordinary OCR backends continue to use ``detect_preprocessed``.
+        """
         crop_width, crop_height = crop.size
         if scale != 1.0:
             working = crop.resize(
@@ -116,7 +127,13 @@ class OnProductBrandingCue:
         if self.sharpen and scale > 1.0:
             working = self._sharpen(working)
         try:
-            detections: list[TextDetection] = self.ocr.detect(working)
+            detector = getattr(self.ocr, method, None) if method else None
+            if not callable(detector):
+                detector = getattr(self.ocr, "detect_preprocessed", None)
+            if callable(detector):
+                detections = list(detector(working))
+            else:
+                detections = list(self.ocr.detect(working))
         except Exception:
             detections = []
         # Rescale detection bboxes back to crop coordinates.
@@ -185,15 +202,35 @@ class OnProductBrandingCue:
             crop = image.crop((round(left), round(top), round(right), round(bottom)))
 
             # Collect detections across all configured scales and paragraph pass.
+            # A selective OCR cascade runs its cheap member at every scale;
+            # only an unmatched crop reaches the stronger backend once.
             all_detections: list[tuple[TextDetection, float]] = []
+            primary_method = (
+                "detect_primary_preprocessed"
+                if callable(getattr(self.ocr, "detect_primary_preprocessed", None))
+                else None
+            )
             for scale in self.scales:
-                for detection in self._ocr_at_scale(crop, scale):
+                for detection in self._ocr_at_scale(crop, scale, method=primary_method):
                     all_detections.append((detection, scale))
             # Paragraph pass at the largest scale to catch merged fragments.
             if self.scales:
                 best_scale = max(self.scales)
                 for detection in self._ocr_paragraph_pass(crop, best_scale):
                     all_detections.append((detection, best_scale))
+                fallback_method = getattr(self.ocr, "detect_fallback_preprocessed", None)
+                has_reliable_primary_match = any(
+                    (match := self.gazetteer.match(detection.text)) is not None
+                    and detection.confidence * match.score >= 0.55
+                    for detection, _scale in all_detections
+                )
+                if callable(fallback_method) and not has_reliable_primary_match:
+                    for detection in self._ocr_at_scale(
+                        crop,
+                        best_scale,
+                        method="detect_fallback_preprocessed",
+                    ):
+                        all_detections.append((detection, best_scale))
 
             # For each brand, keep only the highest-confidence match across
             # all scales and modes. This avoids duplicate evidence while
@@ -357,7 +394,25 @@ class SignageScopeCue:
                 headers.append(sign)
             else:
                 others.append(sign)
-        return headers, others
+        if headers or not instances:
+            return headers, others
+
+        # Some displays place brand plates below the last row (for example
+        # Oakley/Meta at the foot of a countertop display). Treat the bottom
+        # sign band as a bay anchor when no top header was found. This remains
+        # geometry-only and leaves unrelated middle/row labels in `others`.
+        max_y_center = max(_center(s.bbox)[1] for s in signs)
+        max_inst_bottom = max(inst.bbox[1] + inst.bbox[3] for inst in instances)
+        bottom_headers: list[Sign] = []
+        bottom_others: list[Sign] = []
+        for sign in signs:
+            sign_y_center = _center(sign.bbox)[1]
+            is_below = sign.bbox[1] >= max_inst_bottom - median_height * 0.25
+            if abs(sign_y_center - max_y_center) <= band_threshold and is_below:
+                bottom_headers.append(sign)
+            else:
+                bottom_others.append(sign)
+        return bottom_headers, bottom_others
 
     @staticmethod
     def _assign_to_column(
@@ -436,6 +491,57 @@ class SignageScopeCue:
 
         return "none", [], 0.0
 
+    @staticmethod
+    def _boundary_anchors(
+        signs: list[Sign],
+        detections: list[TextDetection] | None,
+        median_height: float,
+    ) -> list[Sign]:
+        """Keep high-quality unknown OCR labels as geometry-only separators.
+
+        A target gazetteer may intentionally omit a neighboring label (for
+        example Meta beside Oakley). Its OCR box is still useful for finding
+        the boundary between bays, but it must never become brand evidence or
+        appear as a target sign in the output.
+        """
+        if not signs or not detections:
+            return []
+        known_y = median(_center(sign.bbox)[1] for sign in signs)
+        anchors: list[Sign] = []
+        for index, detection in enumerate(detections, start=1):
+            if detection.confidence < 0.45:
+                continue
+            normalized = normalize_text(detection.text)
+            tokens = normalized.split()
+            if len("".join(tokens)) < 3 or len(tokens) > 5:
+                continue
+            if abs(_center(detection.bbox)[1] - known_y) > max(2.0 * median_height, 100.0):
+                continue
+            # A matched sign already supplies this geometry. Avoid recreating
+            # it as an unknown separator when a backend emitted both forms.
+            if any(_iou(detection.bbox, sign.bbox) >= 0.25 for sign in signs):
+                continue
+            try:
+                anchors.append(
+                    Sign(
+                        sign_id=f"anchor_{index:04d}",
+                        text=detection.text,
+                        brand=None,
+                        bbox=list(detection.bbox),
+                        scope=Scope(),
+                        confidence=detection.confidence,
+                    )
+                )
+            except ValueError:
+                continue
+        # De-duplicate unknown OCR fragments at the same physical label.
+        unique: list[Sign] = []
+        for anchor in sorted(anchors, key=lambda item: item.confidence, reverse=True):
+            if any(_iou(anchor.bbox, previous.bbox) >= 0.35 for previous in unique):
+                continue
+            unique.append(anchor)
+        return unique
+
     def associate(
         self,
         instances: list[Instance],
@@ -443,6 +549,7 @@ class SignageScopeCue:
         posters: list[PosterRegion],
         *,
         image_width: float | None = None,
+        text_detections: list[TextDetection] | None = None,
     ) -> tuple[list[Sign], list[Evidence]]:
         if instances:
             median_width = max(1.0, median(instance.bbox[2] for instance in instances))
@@ -450,28 +557,49 @@ class SignageScopeCue:
         else:
             median_width = median_height = 1.0
 
+        # Unknown, high-confidence OCR is admitted only as a geometry
+        # separator. It cannot produce evidence because its brand is None.
+        boundary_anchors = self._boundary_anchors(signs, text_detections, median_height)
+        all_input_signs = list(signs) + boundary_anchors
+
         # Filter out poster-contained signs first.
         active_signs: list[Sign] = []
         updated: list[Sign] = []
-        for sign in signs:
+        known_sign_ids = {sign.sign_id for sign in signs}
+        for sign in all_input_signs:
             if self._poster_contains_sign(sign, posters):
-                scoped = replace(sign, scope=Scope("none", None, 0.99))
-                updated.append(scoped)
+                if sign.sign_id in known_sign_ids:
+                    scoped = replace(sign, scope=Scope("none", None, 0.99))
+                    updated.append(scoped)
             else:
                 active_signs.append(sign)
 
         # Step 1: Identify the header band and infer column boundaries.
         header_signs, non_header_signs = self._find_header_band(active_signs, instances, median_height)
 
-        # Only instances below the header band are candidates for column assignment.
+        # A sign band can be above or below the display.  Use its relation to
+        # the instance centroid distribution to decide which side is scoped.
+        bottom_anchor = False
+        header_bottom = None
+        header_top = None
         if header_signs:
+            sign_y = median(_center(sign.bbox)[1] for sign in header_signs)
+            instance_y = median(_center(inst.bbox)[1] for inst in instances) if instances else sign_y
+            bottom_anchor = sign_y > instance_y
             header_bottom = max(s.bbox[1] + s.bbox[3] for s in header_signs)
-            below_instances = [
-                inst for inst in instances
-                if (inst.centroid or _center(inst.bbox))[1] >= header_bottom - median_height * 0.25
-            ]
+            header_top = min(s.bbox[1] for s in header_signs)
+            if bottom_anchor:
+                edge_instances = [
+                    inst for inst in instances
+                    if (inst.centroid or _center(inst.bbox))[1] <= header_top + median_height * 0.25
+                ]
+            else:
+                edge_instances = [
+                    inst for inst in instances
+                    if (inst.centroid or _center(inst.bbox))[1] >= header_bottom - median_height * 0.25
+                ]
         else:
-            below_instances = list(instances)
+            edge_instances = list(instances)
 
         columns = _infer_columns(header_signs, image_width, median_width)
 
@@ -484,8 +612,6 @@ class SignageScopeCue:
 
         for sign in header_signs:
             if not sign.brand:
-                scoped = replace(sign, scope=Scope("none", None, 0.0))
-                updated.append(scoped)
                 continue
 
             # Find all columns for this sign's brand (handles merged columns).
@@ -497,7 +623,7 @@ class SignageScopeCue:
 
             # Collect instances that fall within any of this brand's columns.
             column_instances: list[Instance] = []
-            for inst in below_instances:
+            for inst in edge_instances:
                 assigned_col = self._assign_to_column(inst, columns)
                 if assigned_col is not None and assigned_col.brand == sign.brand:
                     column_instances.append(inst)
@@ -511,10 +637,15 @@ class SignageScopeCue:
             # The scope region is the union of all matching columns.
             col_left = min(c.left for c in sign_columns)
             col_right = max(c.right for c in sign_columns)
-            scope_region = [col_left, header_bottom, col_right - col_left, 0.0]
-            if region:
-                # Extend the region to cover the actual instance positions.
-                scope_region[3] = region[1] + region[3] - header_bottom
+            if bottom_anchor and header_top is not None:
+                scope_region = [col_left, region[1] if region else 0.0, col_right - col_left, 0.0]
+                if region:
+                    scope_region[3] = max(0.0, header_top - region[1])
+            else:
+                scope_region = [col_left, header_bottom or 0.0, col_right - col_left, 0.0]
+                if region:
+                    # Extend the region to cover the actual instance positions.
+                    scope_region[3] = region[1] + region[3] - (header_bottom or 0.0)
 
             # Scope confidence: how cleanly the columns separate brands.
             # If there is only one header sign (no column differentiation possible),
@@ -559,8 +690,6 @@ class SignageScopeCue:
         # Step 3: Handle non-header signs with proximity-based scope.
         for sign in non_header_signs:
             if not sign.brand:
-                scoped = replace(sign, scope=Scope("none", None, 0.0))
-                updated.append(scoped)
                 continue
 
             # Only consider instances not already assigned by header columns.

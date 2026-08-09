@@ -82,6 +82,18 @@ class Gazetteer:
             if brand_tokens and brand_tokens.issubset(text_tokens):
                 return GazetteerMatch(brand, 0.94, "token_containment")
 
+        # OCR often drops an ampersand/conjunction from compound labels (for
+        # example ``DOLCE GABBANA``).  Permit that exact closed-set variant,
+        # but never allow a single token such as ``KORS`` to stand in for
+        # ``MICHAEL KORS``.
+        for brand in self._brands:
+            brand_tokens = set(normalize_text(brand).split())
+            if "and" not in brand_tokens or len(brand_tokens) < 3:
+                continue
+            without_connector = brand_tokens - {"and"}
+            if len(without_connector) >= 2 and without_connector.issubset(text_tokens):
+                return GazetteerMatch(brand, 0.90, "token_containment_without_connector")
+
         # The specification permits edit distance <= 1.  Avoid accepting a
         # one-character OCR fragment as a brand by requiring length >= 4.
         best: GazetteerMatch | None = None

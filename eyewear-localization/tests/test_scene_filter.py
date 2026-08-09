@@ -55,6 +55,15 @@ class SceneFilterTests(unittest.TestCase):
         self.assertEqual(kept, instances)
         self.assertEqual(excluded, [])
 
+    def test_poster_regions_are_retained_for_sign_scope_filtering(self):
+        localizer = SAM3Localizer(
+            _predictor_factory(poster_boxes=[[0, 0, 200, 150]])
+        )
+        filter_ = SAM3SceneFilter(localizer, require_shelf=False)
+        filter_.filter(Path("image.jpg"), [])
+        self.assertEqual(filter_.last_poster_regions[0].bbox, [0.0, 0.0, 200.0, 150.0])
+        self.assertEqual(filter_.last_poster_regions[0].source, "sam3:advertisements")
+
     def test_poster_instances_are_excluded(self):
         localizer = SAM3Localizer(
             _predictor_factory(poster_boxes=[[0, 0, 200, 150]])

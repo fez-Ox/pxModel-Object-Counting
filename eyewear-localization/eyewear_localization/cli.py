@@ -96,8 +96,18 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--config", default=str(DEFAULT_CONFIG), help="YAML configuration")
     parser.add_argument("--brand", action="append", default=[], help="Add one gazetteer brand; repeatable")
     parser.add_argument("--brand-file", help="Text file containing one gazetteer brand per line")
-    parser.add_argument("--ocr-backend", default="easyocr", choices=("easyocr", "florence2", "none"))
+    parser.add_argument(
+        "--ocr-backend",
+        default="easyocr",
+        choices=("easyocr", "florence2", "tesseract", "tesseract+florence2", "none"),
+    )
     parser.add_argument("--ocr-scale", type=float, default=2.0, help="OCR upscale factor (whole-image)")
+    parser.add_argument(
+        "--ocr-fallback-budget",
+        type=int,
+        default=6,
+        help="Maximum Florence-2 calls per image with --ocr-backend tesseract+florence2",
+    )
     parser.add_argument("--c1-margin", type=float, default=None, help="C1 crop margin fraction (default 0.25)")
     parser.add_argument("--c1-scales", default=None, help="C1 multi-scale OCR factors, comma-separated (default '2.0,4.0')")
     parser.add_argument("--c1-no-sharpen", action="store_true", help="Disable post-upscale sharpening in C1")
@@ -166,7 +176,14 @@ def main(argv: list[str] | None = None) -> int:
 
     # Scene thresholds from overrides (or config.yaml defaults)
     scene = overrides.get("scene", {})
-    ocr = build_ocr_backend(args.ocr_backend, gpu=args.device == "cuda", scale=args.ocr_scale)
+    gazetteer = Gazetteer(config.gazetteer)
+    ocr = build_ocr_backend(
+        args.ocr_backend,
+        gpu=args.device == "cuda",
+        scale=args.ocr_scale,
+        gazetteer=gazetteer,
+        fallback_budget=args.ocr_fallback_budget,
+    )
     if args.sam3_checkpoint:
         localizer = build_native_sam3_localizer(
             args.sam3_checkpoint,
@@ -178,7 +195,7 @@ def main(argv: list[str] | None = None) -> int:
     frontend = PerceptionFrontend(
         localizer=localizer,
         ocr=ocr,
-        gazetteer=Gazetteer(config.gazetteer),
+        gazetteer=gazetteer,
         poster_detector=NullPosterBackend("poster regions supplied by scene filter"),
         scene_filter=build_scene_filter(
             localizer,
@@ -198,7 +215,7 @@ def main(argv: list[str] | None = None) -> int:
         c1_kwargs["scales"] = tuple(float(s) for s in args.c1_scales.split(","))
     if args.c1_no_sharpen:
         c1_kwargs["sharpen"] = False
-    c1 = OnProductBrandingCue(ocr, Gazetteer(config.gazetteer), **c1_kwargs)
+    c1 = OnProductBrandingCue(ocr, gazetteer, **c1_kwargs)
     pipeline = LocalizationPipeline(frontend, config=config, c1=c1, c4=StylePriorCue())
     output_dir = Path(args.out)
     output_dir.mkdir(parents=True, exist_ok=True)

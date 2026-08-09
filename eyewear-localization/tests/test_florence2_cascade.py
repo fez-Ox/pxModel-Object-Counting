@@ -1,9 +1,53 @@
+from pathlib import Path
+import tempfile
 import unittest
 
+from PIL import Image
+
 from eyewear_localization.config import LocalizationConfig
+from eyewear_localization.cues import OnProductBrandingCue
 from eyewear_localization.fusion import decide
-from eyewear_localization.perception import Florence2OCRBackend, build_ocr_backend
-from eyewear_localization.schemas import Evidence, Instance
+from eyewear_localization.gazetteer import Gazetteer
+from eyewear_localization.perception import (
+    Florence2OCRBackend,
+    SelectiveOCRBackend,
+    build_ocr_backend,
+)
+from eyewear_localization.schemas import Evidence, Instance, TextDetection
+
+
+class StubOCR:
+    name = "stub"
+    reliability = 1.0
+
+    def __init__(self, detections):
+        self.detections = detections
+        self.calls = 0
+
+    def detect(self, image):
+        self.calls += 1
+        return list(self.detections)
+
+    def detect_preprocessed(self, image):
+        self.calls += 1
+        return list(self.detections)
+
+
+class C1CascadeStub:
+    name = "c1-cascade-stub"
+    reliability = 1.0
+
+    def __init__(self):
+        self.primary_calls = 0
+        self.fallback_calls = 0
+
+    def detect_primary_preprocessed(self, image):
+        self.primary_calls += 1
+        return [TextDetection("unrelated", [1, 1, 10, 5], 0.9, source=self.name)]
+
+    def detect_fallback_preprocessed(self, image):
+        self.fallback_calls += 1
+        return [TextDetection("Cartier", [1, 1, 10, 5], 0.9, source=self.name)]
 
 
 class Florence2AndCascadeTests(unittest.TestCase):
@@ -14,6 +58,52 @@ class Florence2AndCascadeTests(unittest.TestCase):
     def test_build_florence2_ocr_backend(self):
         backend = build_ocr_backend("florence2")
         self.assertEqual(backend.name, "florence2")
+
+    def test_selective_ocr_calls_stronger_backend_only_when_primary_is_unmatched(self):
+        primary = StubOCR([TextDetection("unrelated", [1, 1, 10, 5], 0.9, source="primary")])
+        fallback = StubOCR([TextDetection("Cartier", [2, 2, 12, 5], 0.95, source="fallback")])
+        backend = SelectiveOCRBackend(primary, fallback, Gazetteer(["cartier"]), max_fallback_calls=1)
+
+        output = backend.detect(object())
+        self.assertEqual(primary.calls, 1)
+        self.assertEqual(fallback.calls, 1)
+        self.assertEqual({item.text for item in output}, {"unrelated", "Cartier"})
+
+        # The budget prevents per-instance OCR from expanding without bound.
+        backend.detect_preprocessed(object())
+        self.assertEqual(fallback.calls, 1)
+        backend.reset_budget()
+        backend.detect_preprocessed(object())
+        self.assertEqual(fallback.calls, 2)
+
+    def test_c1_uses_fallback_once_after_all_primary_scales_are_unmatched(self):
+        ocr = C1CascadeStub()
+        cue = OnProductBrandingCue(
+            ocr,
+            Gazetteer(["cartier"]),
+            margin=0.0,
+            scales=(1.0, 2.0),
+            sharpen=False,
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            image_path = Path(directory) / "image.png"
+            Image.new("RGB", (100, 100), "white").save(image_path)
+            evidence = cue.emit(image_path, [Instance("inst_0001", [10, 10, 30, 20])])
+
+        self.assertEqual(ocr.primary_calls, 2)
+        self.assertEqual(ocr.fallback_calls, 1)
+        self.assertEqual(len(evidence), 1)
+        self.assertEqual(evidence[0].brand, "cartier")
+
+    def test_selective_ocr_runs_scene_fallback_even_when_primary_finds_one_brand(self):
+        primary = StubOCR([TextDetection("Cartier", [1, 1, 10, 5], 0.9, source="primary")])
+        fallback = StubOCR([TextDetection("Gucci", [2, 2, 12, 5], 0.95, source="fallback")])
+        backend = SelectiveOCRBackend(primary, fallback, Gazetteer(["cartier", "gucci"]), max_fallback_calls=1)
+
+        output = backend.detect(object())
+        self.assertEqual(primary.calls, 1)
+        self.assertEqual(fallback.calls, 1)
+        self.assertEqual({item.text for item in output}, {"Cartier", "Gucci"})
 
     def test_precision_cascade_c1_overrides_c2(self):
         evidence = [

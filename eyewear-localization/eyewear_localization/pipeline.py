@@ -45,6 +45,11 @@ class LocalizationPipeline:
 
     def run(self, image_path: str | Path, *, source: str | None = None) -> dict[str, Any]:
         image_path = Path(image_path)
+        # A selective OCR cascade shares one bounded stronger-model budget
+        # across L0 signage and C1 product crops for this source image.
+        reset_ocr_budget = getattr(self.frontend.ocr, "reset_budget", None)
+        if callable(reset_ocr_budget):
+            reset_ocr_budget()
         perception = self.frontend.run(image_path)
 
         # Get image dimensions for C2 column-boundary inference.
@@ -66,6 +71,7 @@ class LocalizationPipeline:
                 perception.signs,
                 perception.poster_regions,
                 image_width=image_width,
+                text_detections=perception.text_detections,
             ),
             (perception.signs, []),
         )

@@ -12,7 +12,7 @@ Milestone 1 and the initial L0/C1 implementation are available:
 - Local path, folder, recursive-folder, and URL input handling.
 - Class-agnostic SAM3 adapter using only `sunglasses`, `eyeglasses`,
   `glasses`, and `rimless glasses` prompts.
-- Independent EasyOCR adapter with upscaling for small text.
+- Independent EasyOCR, Tesseract, and zero-shot Florence-2 OCR adapters.
 - Gazetteer matching with normalization, token containment, and edit distance ≤ 1.
 - C1 per-instance crop OCR and C2 geometry-based signage scope hypotheses.
 - Reliability-weighted fusion, `unknown` abstention, and gated C3 smoothing.
@@ -54,8 +54,23 @@ uv run python infer.py /kaggle/input/images --recursive \
 ```
 
 The OCR stage detects all text independently. The configured gazetteer controls
-which strings become `signs[]`; raw OCR remains in `text_detections[]`. The JSON
-contains:
+which strings become `signs[]`; raw OCR remains in `text_detections[]`.
+
+For a Kaggle GPU run, use the bounded selective cascade rather than applying
+Florence-2 to every crop:
+
+```bash
+uv run python infer.py image.jpg --ocr-backend tesseract+florence2 \
+  --ocr-fallback-budget 6
+```
+
+It runs Tesseract first, then performs one Florence-2 scene pass so a match for
+one bay cannot hide a missed sibling brand. Remaining budget is available for
+unmatched C1 crops; C1 runs Tesseract at all configured scales before spending
+at most one Florence-2 call on an unmatched instance. Florence output remains
+OCR evidence and is still closed-set gazetteer-gated.
+
+The JSON contains:
 
 - `instances[]`: class-agnostic eyewear detections kept for attribution.
 - `excluded_instances[]`: L0 detections filtered out by the scene filter (worn on a person, inside an advertisement, or not on a detected shelf) with their reasons.
