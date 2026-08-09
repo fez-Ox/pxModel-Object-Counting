@@ -138,14 +138,32 @@ def main() -> None:
 
     kernel_id = get_or_create_metadata()
     print(f"Kernel Target: {kernel_id}")
+
+    hf_token = os.environ.get("HF_TOKEN", "")
+    if not hf_token:
+        hf_token_path = Path.home() / ".kaggle" / "hf_token"
+        if hf_token_path.exists():
+            hf_token = hf_token_path.read_text().strip()
+
     print("Pushing notebook to Kaggle for GPU execution...")
 
-    # Push kernel
-    result = subprocess.run(
-        [sys.executable, "-m", "kaggle", "kernels", "push", "-p", str(PROJECT_ROOT)],
-        capture_output=True,
-        text=True,
-    )
+    nb_original_text = NOTEBOOK_FILE.read_text()
+    try:
+        if hf_token:
+            print("Injecting HF_TOKEN for gated model authentication...")
+            nb_injected = nb_original_text.replace('HF_TOKEN_FALLBACK = ""', f'HF_TOKEN_FALLBACK = "{hf_token}"')
+            NOTEBOOK_FILE.write_text(nb_injected)
+
+        # Push kernel
+        result = subprocess.run(
+            [sys.executable, "-m", "kaggle", "kernels", "push", "-p", str(PROJECT_ROOT)],
+            capture_output=True,
+            text=True,
+        )
+    finally:
+        # Ensure local notebook is restored so secrets are never written to git
+        NOTEBOOK_FILE.write_text(nb_original_text)
+
     if result.returncode != 0:
         print(f"Push failed:\n{result.stderr}")
         if "your-kaggle-username" in kernel_id:
