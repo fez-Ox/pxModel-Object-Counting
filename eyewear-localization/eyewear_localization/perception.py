@@ -619,6 +619,21 @@ class Florence2OCRBackend:
                 return list(detect_preprocessed(image))
         return list(self._fallback.detect(image))
 
+    @staticmethod
+    def _axis_aligned_box(box: Any) -> tuple[float, float, float, float]:
+        """Convert Florence's bbox or quadrilateral output to ``xyxy``."""
+        values = list(box)
+        if values and isinstance(values[0], (list, tuple)):
+            values = [coordinate for point in values for coordinate in point]
+        values = [float(value) for value in values]
+        if len(values) >= 8:
+            xs = values[0::2]
+            ys = values[1::2]
+            return min(xs), min(ys), max(xs), max(ys)
+        if len(values) >= 4:
+            return values[0], values[1], values[2], values[3]
+        raise ValueError("Florence OCR box has fewer than four coordinates")
+
     def _detect_model(self, source: Any, *, scale: float) -> list[TextDetection]:
         import torch
 
@@ -668,6 +683,10 @@ class Florence2OCRBackend:
         ocr_data = parsed_answer.get(prompt, parsed_answer.get("<OCR>", {}))
         labels = ocr_data.get("labels", []) if isinstance(ocr_data, Mapping) else []
         bboxes = ocr_data.get("bboxes", []) if isinstance(ocr_data, Mapping) else []
+        # Florence-2's OCR post-processor returns quadrilaterals under
+        # ``quad_boxes``; newer forks may normalize them to ``bboxes``.
+        if not bboxes and isinstance(ocr_data, Mapping):
+            bboxes = ocr_data.get("quad_boxes", [])
 
         output: list[TextDetection] = []
         if bboxes and labels and len(bboxes) == len(labels):
@@ -676,7 +695,7 @@ class Florence2OCRBackend:
                 if not text_str:
                     continue
                 try:
-                    x0, y0, x1, y1 = (float(value) for value in box[:4])
+                    x0, y0, x1, y1 = self._axis_aligned_box(box)
                 except (TypeError, ValueError):
                     continue
                 x0 /= scale
