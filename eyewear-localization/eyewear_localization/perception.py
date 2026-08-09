@@ -765,17 +765,34 @@ class Florence2OCRBackend:
             # focused pass; C1 has its separate six-call budget.
             if source.height >= 1600:
                 tile_top = round(source.height * 0.55)
-                tile = source.crop((0, tile_top, source.width, source.height))
-                for detection in self._detect_model(tile, scale=self.scale):
-                    x, y, width, height = detection.bbox
-                    output.append(
-                        TextDetection(
-                            text=detection.text,
-                            bbox=[x, y + tile_top, width, height],
-                            confidence=detection.confidence,
-                            source=detection.source,
+                # Also split a wide display into four focused columns. A
+                # shared Oakley/Meta placard can cause full-width OCR to lock
+                # onto the larger Meta glyphs and miss the neighboring brand
+                # word; column crops keep each logo legible.
+                tile_boxes = [(0, tile_top, source.width, source.height)]
+                if source.width >= 2000:
+                    quarter = source.width / 4.0
+                    tile_boxes.extend(
+                        (
+                            round(max(0.0, index * quarter - quarter * 0.08)),
+                            tile_top,
+                            round(min(float(source.width), (index + 1) * quarter + quarter * 0.08)),
+                            source.height,
                         )
+                        for index in range(4)
                     )
+                for left, top, right, bottom in tile_boxes:
+                    tile = source.crop((left, top, right, bottom))
+                    for detection in self._detect_model(tile, scale=self.scale):
+                        x, y, width, height = detection.bbox
+                        output.append(
+                            TextDetection(
+                                text=detection.text,
+                                bbox=[x + left, y + top, width, height],
+                                confidence=detection.confidence,
+                                source=detection.source,
+                            )
+                        )
         except Exception as exc:
             import sys
             print(f"WARNING Florence2 inference error: {exc}", file=sys.stderr)
