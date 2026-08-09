@@ -689,6 +689,14 @@ class Florence2OCRBackend:
             bboxes = ocr_data.get("quad_boxes", [])
 
         output: list[TextDetection] = []
+        import sys
+        print(
+            "[FLORENCE] OCR parsed: "
+            f"labels={labels[:20]!r} boxes={len(bboxes)} "
+            f"raw={generated_text[:600]!r}",
+            file=sys.stderr,
+            flush=True,
+        )
         if not (bboxes and labels and len(bboxes) == len(labels)):
             import sys
             print(
