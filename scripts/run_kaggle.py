@@ -1,117 +1,155 @@
 #!/usr/bin/env python3
-"""Automated Kaggle Kernel Execution & Output Fetcher.
+"""Validate, push, execute, and download the eyewear Kaggle notebook.
 
-Pushes eyewear_localization_kaggle.ipynb to Kaggle headlessly,
-triggers GPU execution, polls for completion, and downloads all
-generated visualization images & prediction JSON files directly to ./output/.
+The notebook clones the repository at ``origin/main``. This runner therefore
+requires the local HEAD to already be pushed, validates the notebook before
+uploading it, and uploads a temporary copy so the local notebook is never
+modified with a secret.
+
+Credentials are read from the normal Kaggle configuration and from
+``~/.kaggle/hf_token``. Secrets are never printed or committed.
 """
 
+from __future__ import annotations
+
+import argparse
 import json
 import os
 from pathlib import Path
+import re
+import shutil
 import subprocess
 import sys
+import tempfile
 import time
+from typing import Sequence
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 METADATA_FILE = PROJECT_ROOT / "kernel-metadata.json"
 NOTEBOOK_FILE = PROJECT_ROOT / "eyewear_localization_kaggle.ipynb"
 OUTPUT_DIR = PROJECT_ROOT / "output" / "kaggle_results"
+DEFAULT_KERNEL_ID = "faizankhan101/eyewear-localization-brand-attribution"
 
 
-def ensure_kaggle_installed() -> None:
-    """Ensure kaggle CLI package is installed in the uv environment."""
+def _run(command: Sequence[str], *, check: bool = False) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(command, text=True, capture_output=True, check=check)
+
+
+def _kaggle_command() -> list[str]:
+    """Return a working Kaggle CLI command for the current environment."""
     try:
         import kaggle  # noqa: F401
+
+        return [sys.executable, "-m", "kaggle"]
     except ImportError:
-        print("Installing kaggle CLI via uv...")
-        subprocess.check_call(["uv", "pip", "install", "kaggle"])
+        binary = shutil.which("kaggle")
+        if binary:
+            return [binary]
+    raise RuntimeError(
+        "Kaggle CLI is unavailable. Run this script with the project UV environment "
+        "or install it using `uv pip install kaggle`."
+    )
 
 
-def check_credentials() -> bool:
-    """Verify or auto-create ~/.kaggle/kaggle.json."""
-    cred_path = Path.home() / ".kaggle" / "kaggle.json"
-    token_path = Path.home() / ".kaggle" / "access_token"
+def ensure_kaggle_installed() -> list[str]:
+    """Use an existing CLI, or install it into the active UV environment."""
+    try:
+        return _kaggle_command()
+    except RuntimeError:
+        uv = shutil.which("uv")
+        if not uv:
+            raise
+        subprocess.run([uv, "pip", "install", "--python", sys.executable, "kaggle"], check=True)
+        return _kaggle_command()
 
-    env_user = os.environ.get("KAGGLE_USERNAME")
-    env_key = os.environ.get("KAGGLE_KEY")
 
-    if cred_path.exists() or (env_user and env_key):
-        return True
+def _credential_username() -> str:
+    if os.environ.get("KAGGLE_USERNAME"):
+        return os.environ["KAGGLE_USERNAME"]
+    credential_path = Path.home() / ".kaggle" / "kaggle.json"
+    if credential_path.exists():
+        try:
+            value = json.loads(credential_path.read_text(encoding="utf-8"))
+            if value.get("username"):
+                return str(value["username"])
+        except (OSError, ValueError):
+            pass
+    if METADATA_FILE.exists():
+        try:
+            kernel_id = json.loads(METADATA_FILE.read_text(encoding="utf-8")).get("id", "")
+            if "/" in kernel_id:
+                return kernel_id.split("/", 1)[0]
+        except (OSError, ValueError):
+            pass
+    return ""
 
-    # Auto-convert access_token if present
-    if token_path.exists():
-        key = token_path.read_text().strip()
-        # Try to infer username from kernel-metadata.json or env
-        username = env_user or ""
-        if not username and METADATA_FILE.exists():
-            try:
-                meta = json.loads(METADATA_FILE.read_text())
-                parts = meta.get("id", "").split("/")
-                if len(parts) == 2 and parts[0] and parts[0] != "your-kaggle-username":
-                    username = parts[0]
-            except Exception:
-                pass
 
-        if not username:
-            username = "faizan"
+def check_credentials() -> None:
+    """Check that Kaggle credentials have usable values, not just a file."""
+    if os.environ.get("KAGGLE_API_TOKEN"):
+        return
+    if os.environ.get("KAGGLE_USERNAME") and os.environ.get("KAGGLE_KEY"):
+        return
+    credential_path = Path.home() / ".kaggle" / "kaggle.json"
+    if credential_path.exists():
+        try:
+            data = json.loads(credential_path.read_text(encoding="utf-8"))
+            if data.get("username") and data.get("key"):
+                return
+        except (OSError, ValueError):
+            pass
+    access_token = Path.home() / ".kaggle" / "access_token"
+    if access_token.exists() and access_token.read_text(encoding="utf-8").strip() and _credential_username():
+        # The legacy CLI accepts username/key; convert the new token once so
+        # the same credential works across Kaggle CLI versions.
+        credential_path.parent.mkdir(parents=True, exist_ok=True)
+        credential_path.write_text(
+            json.dumps(
+                {"username": _credential_username(), "key": access_token.read_text(encoding="utf-8").strip()},
+                indent=2,
+            ),
+            encoding="utf-8",
+        )
+        credential_path.chmod(0o600)
+        return
+    raise RuntimeError(
+        "Kaggle credentials are unavailable. Set KAGGLE_API_TOKEN or "
+        "KAGGLE_USERNAME/KAGGLE_KEY, or place kaggle.json in ~/.kaggle/."
+    )
 
-        if key:
-            cred_path.parent.mkdir(parents=True, exist_ok=True)
-            cred_data = {"username": username, "key": key}
-            cred_path.write_text(json.dumps(cred_data, indent=2))
-            try:
-                cred_path.chmod(0o600)
-            except Exception:
-                pass
-            print(f"Auto-configured Kaggle API credentials at {cred_path} for user '{username}'.")
-            return True
 
-    print("\n" + "=" * 65)
-    print("ERROR: Kaggle credentials not found!")
-    print("To enable headless 1-click execution on Kaggle:")
-    print("  1. Go to https://www.kaggle.com/settings")
-    print("  2. Click 'Create New Token' under API section")
-    print("  3. Save the downloaded kaggle.json file to ~/.kaggle/kaggle.json")
-    print("     or set environment variables KAGGLE_USERNAME and KAGGLE_KEY.")
-    print("=" * 65 + "\n")
-    return False
+def get_hf_token(token_file: Path | None = None) -> str:
+    """Read the approved local HF token without logging its value."""
+    token = os.environ.get("HF_TOKEN") or os.environ.get("HUGGINGFACE_HUB_TOKEN")
+    if token:
+        return token.strip()
+    path = token_file or (Path.home() / ".kaggle" / "hf_token")
+    if path.exists():
+        value = path.read_text(encoding="utf-8").strip()
+        if value:
+            return value
+    raise RuntimeError(
+        f"No Hugging Face token found. Add an approved token to {path} or set HF_TOKEN."
+    )
 
 
 def get_or_create_metadata() -> str:
-    """Read or create kernel-metadata.json."""
-    default_username = os.environ.get("KAGGLE_USERNAME", "")
-    if not default_username:
-        cred_path = Path.home() / ".kaggle" / "kaggle.json"
-        if cred_path.exists():
-            try:
-                data = json.loads(cred_path.read_text())
-                default_username = data.get("username", "")
-            except Exception:
-                pass
-
-    if not default_username:
-        default_username = "your-kaggle-username"
-
-    slug = "eyewear-localization-kaggle"
-    kernel_id = f"{default_username}/{slug}"
-
+    """Write metadata with the configured Kaggle owner and return kernel id."""
+    username = _credential_username()
+    if not username:
+        raise RuntimeError("Could not determine Kaggle username for kernel metadata.")
+    kernel_id = f"{username}/eyewear-localization-brand-attribution"
     if METADATA_FILE.exists():
         try:
-            meta = json.loads(METADATA_FILE.read_text())
-            kernel_id = meta.get("id", kernel_id)
-        except Exception:
+            existing = json.loads(METADATA_FILE.read_text(encoding="utf-8")).get("id", "")
+            if existing and existing.split("/", 1)[0] == username:
+                kernel_id = existing
+        except (OSError, ValueError):
             pass
-
-    # Auto-load HF_TOKEN from ~/.kaggle/hf_token if present
-    hf_token_path = Path.home() / ".kaggle" / "hf_token"
-    if hf_token_path.exists() and "HF_TOKEN" not in os.environ:
-        os.environ["HF_TOKEN"] = hf_token_path.read_text().strip()
-
     metadata_content = {
         "id": kernel_id,
         "title": "Eyewear Localization Brand Attribution",
-        "code_file": "eyewear_localization_kaggle.ipynb",
+        "code_file": NOTEBOOK_FILE.name,
         "language": "python",
         "kernel_type": "notebook",
         "is_private": "true",
@@ -122,112 +160,149 @@ def get_or_create_metadata() -> str:
         "kernel_sources": [],
         "competition_sources": [],
     }
-
-    METADATA_FILE.write_text(json.dumps(metadata_content, indent=2))
+    METADATA_FILE.write_text(json.dumps(metadata_content, indent=2) + "\n", encoding="utf-8")
     return kernel_id
 
 
-def set_notebook_hf_token(notebook_path: Path, token_value: str) -> None:
-    """Inject token_value into HF_TOKEN_FALLBACK in notebook JSON."""
-    data = json.loads(notebook_path.read_text())
-    for cell in data.get("cells", []):
-        if cell.get("cell_type") == "code":
-            new_source = []
-            for line in cell.get("source", []):
-                if line.startswith("HF_TOKEN_FALLBACK ="):
-                    new_source.append(f'HF_TOKEN_FALLBACK = "{token_value}"\n')
-                else:
-                    new_source.append(line)
-            cell["source"] = new_source
-    notebook_path.write_text(json.dumps(data, indent=1))
-
-
-def main() -> None:
-    print("=== Automated Kaggle Remote Execution ===")
-    print("Note: Headless batch push automatically powers off the Kaggle GPU worker container")
-    print("      as soon as notebook execution completes, protecting your GPU quota.")
-    ensure_kaggle_installed()
-
-    if not check_credentials():
-        sys.exit(1)
-
-    kernel_id = get_or_create_metadata()
-    print(f"Kernel Target: {kernel_id}")
-
-    hf_token = os.environ.get("HF_TOKEN", "")
-    if not hf_token:
-        hf_token_path = Path.home() / ".kaggle" / "hf_token"
-        if hf_token_path.exists():
-            hf_token = hf_token_path.read_text().strip()
-
-    print("Pushing notebook to Kaggle for GPU execution...")
-
-    nb_original_text = NOTEBOOK_FILE.read_text()
+def validate_notebook(path: Path = NOTEBOOK_FILE) -> None:
+    """Perform the same cheap checks locally that would otherwise fail remotely."""
     try:
-        if hf_token:
-            print(f"Injecting HF_TOKEN ({hf_token[:6]}...) into notebook for push...")
-            set_notebook_hf_token(NOTEBOOK_FILE, hf_token)
+        notebook = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        raise RuntimeError(f"Cannot read notebook {path}: {exc}") from exc
+    if notebook.get("nbformat", 0) < 4:
+        raise RuntimeError("Notebook is not a valid nbformat v4 notebook.")
+    code = ["".join(cell.get("source", [])) for cell in notebook.get("cells", []) if cell.get("cell_type") == "code"]
+    if not any("SAM3_CHECKPOINT" in source for source in code):
+        raise RuntimeError("Notebook is missing the SAM3 setup/inference cells.")
+    if not any("HF_TOKEN_FALLBACK" in source for source in code):
+        raise RuntimeError("Notebook has no HF_TOKEN_FALLBACK hook for headless execution.")
+    for index, source in enumerate(code):
+        try:
+            compile(source, f"{path}:cell-{index}", "exec")
+        except SyntaxError as exc:
+            raise RuntimeError(f"Notebook code cell {index} has a syntax error: {exc}") from exc
 
-        # Push kernel
-        result = subprocess.run(
-            [sys.executable, "-m", "kaggle", "kernels", "push", "-p", str(PROJECT_ROOT)],
-            capture_output=True,
-            text=True,
+
+def ensure_remote_head() -> None:
+    """The notebook clones origin/main, so prevent stale-code execution."""
+    local = _run(["git", "-C", str(PROJECT_ROOT), "rev-parse", "HEAD"], check=True).stdout.strip()
+    remote_proc = _run(["git", "-C", str(PROJECT_ROOT), "ls-remote", "origin", "refs/heads/main"])
+    if remote_proc.returncode != 0:
+        raise RuntimeError(f"Could not verify origin/main: {remote_proc.stderr.strip()}")
+    remote = remote_proc.stdout.split()[0] if remote_proc.stdout.split() else ""
+    if not remote or remote != local:
+        raise RuntimeError(
+            f"origin/main ({remote or 'unknown'}) does not match local HEAD ({local}). "
+            "Commit and push the code before running Kaggle."
         )
+
+
+def set_notebook_hf_token(notebook_path: Path, token_value: str) -> None:
+    """Inject a token into a temporary notebook copy, never the working tree."""
+    data = json.loads(notebook_path.read_text(encoding="utf-8"))
+    replacement = json.dumps(token_value)
+    replaced = 0
+    for cell in data.get("cells", []):
+        if cell.get("cell_type") != "code":
+            continue
+        source = "".join(cell.get("source", []))
+        updated, count = re.subn(
+            r"(?m)^(\s*HF_TOKEN_FALLBACK\s*=\s*).*$",
+            lambda match: match.group(1) + replacement,
+            source,
+        )
+        if count:
+            replaced += count
+            cell["source"] = updated.splitlines(keepends=True)
+    if replaced == 0:
+        raise RuntimeError("Could not find HF_TOKEN_FALLBACK in notebook.")
+    notebook_path.write_text(json.dumps(data, indent=1) + "\n", encoding="utf-8")
+
+
+def _push_directory(token: str) -> tempfile.TemporaryDirectory[str]:
+    """Create a minimal push directory and inject the token only there."""
+    temporary = tempfile.TemporaryDirectory(prefix="eyewear-kaggle-push-")
+    directory = Path(temporary.name)
+    shutil.copy2(NOTEBOOK_FILE, directory / NOTEBOOK_FILE.name)
+    shutil.copy2(METADATA_FILE, directory / METADATA_FILE.name)
+    set_notebook_hf_token(directory / NOTEBOOK_FILE.name, token)
+    if token not in (directory / NOTEBOOK_FILE.name).read_text(encoding="utf-8"):
+        raise RuntimeError("HF token injection verification failed.")
+    return temporary
+
+
+def _status(kaggle: list[str], kernel_id: str) -> tuple[int, str]:
+    process = _run([*kaggle, "kernels", "status", kernel_id])
+    return process.returncode, (process.stdout + process.stderr).strip()
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--kernel-id", default=None, help="Override the metadata kernel id")
+    parser.add_argument("--hf-token-file", type=Path, default=None)
+    parser.add_argument("--output", type=Path, default=OUTPUT_DIR)
+    parser.add_argument("--wait-timeout", type=int, default=1800)
+    parser.add_argument("--poll-seconds", type=int, default=15)
+    parser.add_argument("--skip-remote-head-check", action="store_true")
+    args = parser.parse_args(argv)
+
+    print("=== Automated Kaggle Remote Execution ===")
+    validate_notebook()
+    if not args.skip_remote_head_check:
+        ensure_remote_head()
+    check_credentials()
+    kaggle = ensure_kaggle_installed()
+    kernel_id = args.kernel_id or get_or_create_metadata()
+    token = get_hf_token(args.hf_token_file)
+
+    # Validate the Kaggle API before uploading the notebook.
+    rc, status = _status(kaggle, kernel_id)
+    if rc != 0:
+        raise RuntimeError(f"Kaggle API authentication/status check failed: {status}")
+    print(f"Kaggle API: authenticated; kernel={kernel_id}")
+    print("HF token: available (value not printed)")
+
+    temporary = _push_directory(token)
+    try:
+        print("Pushing validated notebook to Kaggle...")
+        pushed = _run([*kaggle, "kernels", "push", "-p", temporary.name])
+        if pushed.returncode != 0:
+            raise RuntimeError(f"Kaggle push failed:\n{pushed.stdout}\n{pushed.stderr}")
+        print(pushed.stdout.strip())
     finally:
-        # Ensure local notebook is restored so secrets are never written to git
-        NOTEBOOK_FILE.write_text(nb_original_text)
+        temporary.cleanup()
 
-    if result.returncode != 0:
-        print(f"Push failed:\n{result.stderr}")
-        if "your-kaggle-username" in kernel_id:
-            print("\nPlease update 'id' in kernel-metadata.json with your actual Kaggle username.")
-        sys.exit(1)
-
-    print(f"Success! {result.stdout.strip()}")
-    print("Waiting for cloud GPU execution to complete...")
-
-    # Poll status
-    start_time = time.time()
+    print("Waiting for cloud GPU execution...")
+    started = time.monotonic()
     last_status = ""
-    while True:
-        status_proc = subprocess.run(
-            [sys.executable, "-m", "kaggle", "kernels", "status", kernel_id],
-            capture_output=True,
-            text=True,
-        )
-        status_line = status_proc.stdout.strip()
-        if status_line != last_status:
-            print(f"[{int(time.time() - start_time)}s] Status: {status_line}")
-            last_status = status_line
-
-        status_lower = status_line.lower()
-        if "complete" in status_lower:
-            print("\nExecution finished successfully!")
+    while time.monotonic() - started < args.wait_timeout:
+        rc, status = _status(kaggle, kernel_id)
+        if status != last_status:
+            print(f"[{int(time.monotonic() - started)}s] {status}")
+            last_status = status
+        if rc != 0:
+            raise RuntimeError(f"Kaggle status failed: {status}")
+        lowered = status.lower()
+        if "complete" in lowered:
             break
-        if "error" in status_lower or "failed" in status_lower:
-            print(f"\nExecution failed on Kaggle: {status_line}")
-            sys.exit(1)
-
-        time.sleep(15)
-
-    # Fetch results
-    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-    print(f"Downloading output results to {OUTPUT_DIR}...")
-
-    out_proc = subprocess.run(
-        [sys.executable, "-m", "kaggle", "kernels", "output", kernel_id, "-p", str(OUTPUT_DIR)],
-        capture_output=True,
-        text=True,
-    )
-    if out_proc.returncode == 0:
-        print(f"\nResults downloaded successfully to {OUTPUT_DIR}/!")
-        files = list(OUTPUT_DIR.glob("*"))
-        for f in files:
-            print(f"  - {f.name}")
+        if any(word in lowered for word in ("error", "failed")):
+            raise RuntimeError(f"Kaggle execution failed: {status}")
+        time.sleep(max(1, args.poll_seconds))
     else:
-        print(f"Download failed: {out_proc.stderr}")
+        raise TimeoutError(f"Kaggle kernel did not finish within {args.wait_timeout}s.")
+
+    args.output.mkdir(parents=True, exist_ok=True)
+    output = _run([*kaggle, "kernels", "output", kernel_id, "-p", str(args.output)])
+    if output.returncode != 0:
+        raise RuntimeError(f"Kaggle output download failed:\n{output.stdout}\n{output.stderr}")
+    print(f"Results downloaded to {args.output}")
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        raise SystemExit(main())
+    except (RuntimeError, TimeoutError) as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        raise SystemExit(1) from exc

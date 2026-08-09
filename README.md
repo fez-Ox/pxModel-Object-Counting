@@ -20,7 +20,19 @@ uv run python infer.py "https://example.com/image.jpg" "cars"
 
 For an independent native-SAM3 pipeline that counts objects from verbose natural-language prompts, see [`sam3-verbose-counting/README.md`](sam3-verbose-counting/README.md).
 
-## Kaggle notebook
+## Kaggle notebooks and headless execution
+
+For the eyewear attribution pipeline, use [`eyewear_localization_kaggle.ipynb`](eyewear_localization_kaggle.ipynb). The validated headless runner is:
+
+```bash
+uv run python scripts/run_kaggle.py
+```
+
+It requires Kaggle credentials in `~/.kaggle/kaggle.json` and an approved
+Hugging Face token in `~/.kaggle/hf_token`. Tokens are never committed. The
+runner checks the notebook and remote git revision before pushing, uses
+Kaggle's compatible preinstalled CUDA/Torch stack, and downloads results under
+`output/kaggle_results/`.
 
 To run the native SAM3 verbose-prompt counter end to end (setup, checkpoint download, and inline inference) in a Kaggle notebook, open [`sam3_verbose_counting_kaggle.ipynb`](sam3_verbose_counting_kaggle.ipynb). It:
 

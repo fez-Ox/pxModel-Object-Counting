@@ -86,11 +86,26 @@ regions were detected, detections outside them are removed too. Every removal
 is recorded in `excluded_instances[]` and drawn in red in the annotated image.
 Control with `--shelf-filter` / `--no-shelf-filter` (default: on).
 
-## Notebook
+## Kaggle notebook and headless runner
 
-A simple Kaggle-ready walkthrough is at `../eyewear_localization_kaggle.ipynb`.
-It runs OCR without SAM3 first, then optionally runs full attribution when an
-approved `sam3.pt` is attached as a Kaggle dataset.
+The Kaggle-ready walkthrough is at `../eyewear_localization_kaggle.ipynb`.
+It uses Kaggle's preinstalled CUDA/Torch pair rather than running `uv sync`
+inside the GPU worker (installing a newer CUDA wheel can make SAM3 fail with
+`no kernel image is available`). It verifies CUDA, authenticates HF access,
+downloads the gated checkpoint, and refuses to report a false empty full pass.
+
+For headless execution from the repository root:
+
+```bash
+# ~/.kaggle/kaggle.json: Kaggle API credentials
+# ~/.kaggle/hf_token: approved token for facebook/sam3
+uv run python scripts/run_kaggle.py
+```
+
+The runner validates notebook syntax, verifies that local `HEAD` matches
+`origin/main`, pushes a temporary notebook copy, injects the HF token only in
+that temporary copy, waits for the GPU kernel, and downloads results to
+`output/kaggle_results/`. It never writes the token into the working tree.
 
 ## Diagnosis (offline, no model downloads)
 

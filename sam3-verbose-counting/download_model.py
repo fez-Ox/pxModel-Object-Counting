@@ -47,16 +47,22 @@ def download_model(
 
     output.parent.mkdir(parents=True, exist_ok=True)
     token = _get_token(token)
+    if not token:
+        raise SystemExit(
+            "No Hugging Face token found. Add an approved HF_TOKEN Kaggle Secret "
+            "or pass --token explicitly."
+        )
 
     try:
         from huggingface_hub import hf_hub_download
 
-        print(f"Downloading SAM3 checkpoint via hf_hub_download...")
+        print("Downloading SAM3 checkpoint via hf_hub_download...")
         downloaded_path = hf_hub_download(
             repo_id="facebook/sam3",
             filename="sam3.pt",
             token=token,
             local_dir=str(output.parent),
+            force_download=force,
         )
         downloaded = Path(downloaded_path)
         if downloaded != output and downloaded.exists():
@@ -64,19 +70,39 @@ def download_model(
         print(f"Done: {output}")
         return output
     except Exception as exc:
-        print(f"hf_hub_download failed ({exc}), trying direct urllib...")
+        # Keep a direct fallback for Kaggle images with an older or partially
+        # broken huggingface_hub. The fallback handles the gated URL's 302
+        # redirect explicitly: the bearer token is sent to Hugging Face, while
+        # the signed CDN URL is fetched without forwarding that header.
+        print(f"hf_hub_download failed ({type(exc).__name__}), trying direct HTTP...")
 
     temporary = output.with_name(output.name + ".part")
     temporary.unlink(missing_ok=True)
-    headers = {"User-Agent": "sam3-verbose-counting/1.0"}
-    if token:
-        headers["Authorization"] = f"Bearer {token}"
+    headers = {"User-Agent": "sam3-verbose-counting/1.0", "Authorization": f"Bearer {token}"}
     request = urllib.request.Request(url, headers=headers)
 
+    class _NoRedirect(urllib.request.HTTPRedirectHandler):
+        def redirect_request(self, req, fp, code, msg, headers, newurl):
+            return None
+
+    opener = urllib.request.build_opener(_NoRedirect)
     print(f"Downloading: {url}")
     print(f"Destination: {output}")
     try:
-        with urllib.request.urlopen(request, timeout=timeout) as response, temporary.open("wb") as stream:
+        try:
+            response = opener.open(request, timeout=timeout)
+        except urllib.error.HTTPError as exc:
+            if exc.code not in {301, 302, 303, 307, 308}:
+                raise
+            location = exc.headers.get("Location")
+            if not location:
+                raise
+            # The redirect URL is already signed by Hugging Face.
+            response = urllib.request.urlopen(
+                urllib.request.Request(location, headers={"User-Agent": headers["User-Agent"]}),
+                timeout=timeout,
+            )
+        with response, temporary.open("wb") as stream:
             total = int(response.headers.get("Content-Length") or 0)
             downloaded_bytes = 0
             while True:
