@@ -791,6 +791,68 @@ class SignageScopeCue:
                     )
                 )
 
+        # If two spatially separated signs independently resolve to the same
+        # closed-set brand, treat them as corroborated display anchors. This
+        # recovers the common two-sided placard layout where column anchors
+        # leave center/overlapping eyewear outside either narrow column. It is
+        # deliberately disabled when any competing known brand is present.
+        known_signs = [sign for sign in signs if sign.brand]
+        known_brands = {sign.brand for sign in known_signs}
+        separated_same_brand = [
+            sign for sign in known_signs
+            if sign.brand == next(iter(known_brands), None)
+            and all(
+                _iou(sign.bbox, other.bbox) < 0.25
+                for other in known_signs
+                if other is not sign and other.brand == sign.brand
+            )
+        ]
+        if len(known_brands) == 1 and len(separated_same_brand) >= 2 and instances:
+            brand = next(iter(known_brands))
+            sign_confidence = max(sign.confidence for sign in separated_same_brand)
+            corroborated_confidence = min(0.80, max(0.72, sign_confidence * 1.10))
+            span = _union(instances)
+            sign_ids = [sign.sign_id for sign in separated_same_brand]
+            sign_texts = [sign.text for sign in separated_same_brand]
+            covered: set[str] = set()
+            for index, item in enumerate(evidence):
+                if item.cue != "C2" or item.brand != brand:
+                    continue
+                covered.add(item.instance_id)
+                if item.confidence < corroborated_confidence:
+                    support = dict(item.support)
+                    support.update({
+                        "scope_type": "same_brand_display_span",
+                        "sign_ids": sign_ids,
+                        "sign_texts": sign_texts,
+                        "sign_confidence": sign_confidence,
+                    })
+                    evidence[index] = Evidence(
+                        instance_id=item.instance_id,
+                        brand=item.brand,
+                        confidence=corroborated_confidence,
+                        cue=item.cue,
+                        support=support,
+                    )
+            for instance in instances:
+                if instance.id in covered:
+                    continue
+                evidence.append(
+                    Evidence(
+                        instance_id=instance.id,
+                        brand=brand,
+                        confidence=corroborated_confidence,
+                        cue="C2",
+                        support={
+                            "scope": Scope("bay_header", span, corroborated_confidence).to_dict(),
+                            "scope_type": "same_brand_display_span",
+                            "sign_ids": sign_ids,
+                            "sign_texts": sign_texts,
+                            "sign_confidence": sign_confidence,
+                        },
+                    )
+                )
+
         return updated, evidence
 
     def emit(
