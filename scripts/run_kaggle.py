@@ -256,11 +256,19 @@ def main(argv: list[str] | None = None) -> int:
     kernel_id = args.kernel_id or get_or_create_metadata()
     token = get_hf_token(args.hf_token_file)
 
-    # Validate the Kaggle API before uploading the notebook.
+    # Validate the Kaggle API before uploading the notebook. The target may
+    # legitimately be absent after a failed/stopped run; `kernels list` checks
+    # credentials without requiring that particular private kernel to exist.
     rc, status = _status(kaggle, kernel_id)
     if rc != 0:
-        raise RuntimeError(f"Kaggle API authentication/status check failed: {status}")
-    print(f"Kaggle API: authenticated; kernel={kernel_id}")
+        credential_probe = _run([*kaggle, "kernels", "list", "--mine", "--page-size", "1"])
+        if credential_probe.returncode != 0:
+            raise RuntimeError(
+                f"Kaggle API authentication failed: {status}\\n{credential_probe.stderr.strip()}"
+            )
+        print("Kaggle API: authenticated; target kernel will be created/updated")
+    else:
+        print(f"Kaggle API: authenticated; kernel={kernel_id}")
     print("HF token: available (value not printed)")
 
     temporary = _push_directory(token)
