@@ -811,11 +811,13 @@ class SAM3Localizer:
         score_threshold: float = 0.5,
         rimless_threshold: float = 0.35,
         duplicate_iou: float = 0.7,
+        verbose: bool = False,
     ) -> None:
         self.predictor = predictor
         self.score_threshold = float(score_threshold)
         self.rimless_threshold = float(rimless_threshold)
         self.duplicate_iou = float(duplicate_iou)
+        self.verbose = bool(verbose)
 
     @staticmethod
     def _as_list(value: Any) -> list[Any]:
@@ -880,12 +882,17 @@ class SAM3Localizer:
     ) -> list[LocalizationDetection]:
         """Run one non-brand prompt through the injected SAM3 predictor."""
         limit = self.score_threshold if threshold is None else float(threshold)
+        if self.verbose:
+            print(f"[SAM3] start prompt={prompt!r} image={image_path.name}", flush=True)
         candidates = [
             LocalizationDetection(box, score, prompt, mask_rle)
             for box, score, mask_rle in self._predictions(self.predictor(image_path, prompt))
             if len(box) == 4 and score >= limit
         ]
-        return self._deduplicate(candidates)
+        result = self._deduplicate(candidates)
+        if self.verbose:
+            print(f"[SAM3] done prompt={prompt!r} detections={len(result)}", flush=True)
+        return result
 
     def detect(self, image_path: Path) -> list[LocalizationDetection]:
         candidates: list[LocalizationDetection] = []
@@ -917,12 +924,14 @@ def build_native_sam3_localizer(
             raise ImportError("could not load native SAM3 inference module")
         module = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(module)
+        print(f"[SAM3] loading checkpoint={checkpoint}", flush=True)
         counter = module.build_counter(
             checkpoint=checkpoint,
             device=device,
             threshold=threshold,
             amp=amp,
         )
+        print("[SAM3] model ready", flush=True)
 
         def predictor(image_path: Path, prompt: str) -> dict[str, Any]:
             return counter.infer(
@@ -932,7 +941,7 @@ def build_native_sam3_localizer(
                 filter_prompt=None,
             )
 
-        return SAM3Localizer(predictor, score_threshold=threshold)
+        return SAM3Localizer(predictor, score_threshold=threshold, verbose=True)
     except Exception as exc:
         return HeuristicLocalizer(f"native SAM3 unavailable: {exc}")
 

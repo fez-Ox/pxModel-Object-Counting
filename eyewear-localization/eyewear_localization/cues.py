@@ -83,12 +83,14 @@ class OnProductBrandingCue:
         margin: float = 0.25,
         scales: tuple[float, ...] | list[float] = (2.0, 4.0),
         sharpen: bool = True,
+        verbose: bool = False,
     ) -> None:
         self.ocr = ocr
         self.gazetteer = gazetteer
         self.margin = max(0.0, float(margin))
         self.scales = tuple(max(1.0, float(s)) for s in scales) if scales else (2.0,)
         self.sharpen = sharpen
+        self.verbose = bool(verbose)
 
     @staticmethod
     def _load(image_path: str | Path):
@@ -191,6 +193,8 @@ class OnProductBrandingCue:
         image = self._load(image_path)
         width, height = image.size
         evidence: list[Evidence] = []
+        if self.verbose:
+            print(f"[C1] start instances={len(instances)}", flush=True)
         for instance in instances:
             x, y, box_width, box_height = instance.bbox
             margin_x = box_width * self.margin
@@ -265,7 +269,13 @@ class OnProductBrandingCue:
                 existing = best_per_brand.get(match.brand)
                 if existing is None or combined_confidence > existing[1]:
                     best_per_brand[match.brand] = (ev, combined_confidence)
-            evidence.extend(ev for ev, _ in best_per_brand.values())
+            instance_evidence = [ev for ev, _ in best_per_brand.values()]
+            evidence.extend(instance_evidence)
+            if self.verbose:
+                print(
+                    f"[C1] {instance.id} evidence={len(instance_evidence)}",
+                    flush=True,
+                )
         return evidence
 
 

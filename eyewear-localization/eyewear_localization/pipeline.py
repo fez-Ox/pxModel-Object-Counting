@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import time
 from typing import Any
 
 from eyewear_localization.config import LocalizationConfig
@@ -50,7 +51,17 @@ class LocalizationPipeline:
         reset_ocr_budget = getattr(self.frontend.ocr, "reset_budget", None)
         if callable(reset_ocr_budget):
             reset_ocr_budget()
+        verbose = bool(getattr(self.frontend.localizer, "verbose", False))
+        started = time.perf_counter()
+        if verbose:
+            print(f"[PIPE] start image={image_path.name}", flush=True)
         perception = self.frontend.run(image_path)
+        if verbose:
+            print(
+                f"[PIPE] L0 done instances={len(perception.instances)} "
+                f"signs={len(perception.signs)} elapsed={time.perf_counter() - started:.1f}s",
+                flush=True,
+            )
 
         # Get image dimensions for C2 column-boundary inference.
         image_width: float | None = None
@@ -62,9 +73,16 @@ class LocalizationPipeline:
         except Exception:
             pass
 
+        c1_started = time.perf_counter()
         c1_evidence = self._safe(
             self.c1.emit, [], image_path, perception.instances
         )
+        if verbose:
+            print(
+                f"[PIPE] C1 done evidence={len(c1_evidence)} "
+                f"elapsed={time.perf_counter() - c1_started:.1f}s",
+                flush=True,
+            )
         scoped_signs, c2_evidence = self._safe(
             lambda: self.c2.associate(
                 perception.instances,
@@ -78,6 +96,12 @@ class LocalizationPipeline:
         c4_evidence = self._safe(
             self.c4.emit, [], image_path, perception.instances
         )
+        if verbose:
+            print(
+                f"[PIPE] C2/C4 done c2={len(c2_evidence)} c4={len(c4_evidence)} "
+                f"elapsed={time.perf_counter() - started:.1f}s",
+                flush=True,
+            )
         evidence = list(c1_evidence) + list(c2_evidence) + list(c4_evidence)
 
         probabilities = fuse_evidence(perception.instances, evidence, self.config)

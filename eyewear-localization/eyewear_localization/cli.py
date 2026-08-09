@@ -208,7 +208,9 @@ def main(argv: list[str] | None = None) -> int:
     if args.no_vlm_audit:
         config.use_vlm_audit = False
     # Build C1 with optional tuning parameters.
-    c1_kwargs: dict[str, Any] = {}
+    c1_kwargs: dict[str, Any] = {
+        "verbose": bool(getattr(localizer, "verbose", False)),
+    }
     if args.c1_margin is not None:
         c1_kwargs["margin"] = args.c1_margin
     if args.c1_scales is not None:
