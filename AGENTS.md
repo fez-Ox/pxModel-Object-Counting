@@ -57,6 +57,7 @@ Single-file project. Entrypoint: `main.py` — tests DinoV2 and DinoV3 via Huggi
 - **Label Semantics**: Distinguishes `product_brand` (physical frame) vs `zone_brand` (display bay) on `AttributionOutput`.
 - **Inference CLI**: `cd eyewear-localization && uv run python infer.py image.jpg --ocr-backend florence2`
 - **Test suite**: `cd eyewear-localization && uv run pytest` (44 unit tests covering schemas, perception, C2 determinism, and precision cascade).
+- **Automated Remote GPU Testing**: `uv run python scripts/run_kaggle.py` (pushes notebook, triggers GPU execution headlessly, streams status, and downloads results to `./output/kaggle_results/`).
 - **Kaggle notebook**: `eyewear_localization_kaggle.ipynb` (CUDA GPU execution).
 
 ## Design doc
