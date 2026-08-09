@@ -305,6 +305,18 @@ def _save_remote_logs(kaggle: list[str], kernel_id: str, output_dir: Path) -> Pa
     path.write_text(payload, encoding="utf-8")
     return path
 
+def _save_remote_output(kaggle: list[str], kernel_id: str, output_dir: Path) -> bool:
+    """Download partial artifacts before deleting a failed worker."""
+    output_dir.mkdir(parents=True, exist_ok=True)
+    process = _run([*kaggle, "kernels", "output", kernel_id, "-p", str(output_dir)])
+    if process.returncode == 0:
+        print(f"Saved partial remote output: {output_dir}", flush=True)
+        return True
+    message = (process.stdout + process.stderr).strip()
+    if message:
+        print(f"WARNING: partial remote output unavailable: {message[-1000:]}", flush=True)
+    return False
+
 
 def _cleanup_after_abort(
     kaggle: list[str],
@@ -318,6 +330,7 @@ def _cleanup_after_abort(
         log_path = _save_remote_logs(kaggle, kernel_id, output_dir)
         if log_path:
             print(f"Saved remote logs: {log_path}", flush=True)
+        _save_remote_output(kaggle, kernel_id, output_dir)
     except OSError as exc:
         print(f"WARNING: could not save remote logs: {exc}", flush=True)
     print(f"Remote cleanup ({reason}): {_delete_kernel(kaggle, kernel_id)}", flush=True)
