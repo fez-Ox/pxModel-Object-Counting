@@ -377,6 +377,37 @@ class SignageScopeCue:
         center = _center(sign.bbox)
         return any(_contains(poster.bbox, center) or _iou(sign.bbox, poster.bbox) >= 0.1 for poster in posters)
 
+    @classmethod
+    def _is_poster_header_sign(
+        cls,
+        sign: Sign,
+        posters: list[PosterRegion],
+        instances: list[Instance],
+        median_height: float,
+    ) -> bool:
+        """Allow only a poster that is an actual header above the display.
+
+        Campaign banners can carry the only readable brand label while sitting
+        immediately above the shelf. This exception does not admit side/bottom
+        advertisements: the containing poster must end no lower than the first
+        eyewear row (with a small object-height tolerance), and the sign must
+        be in its upper display-facing area.
+        """
+        if not instances or not cls._poster_contains_sign(sign, posters):
+            return False
+        first_instance_top = min(instance.bbox[1] for instance in instances)
+        sign_center_y = _center(sign.bbox)[1]
+        for poster in posters:
+            if not (_contains(poster.bbox, _center(sign.bbox)) or _iou(sign.bbox, poster.bbox) >= 0.1):
+                continue
+            poster_bottom = poster.bbox[1] + poster.bbox[3]
+            if (
+                poster_bottom <= first_instance_top + max(median_height, 40.0)
+                and sign_center_y <= poster.bbox[1] + poster.bbox[3] * 0.75
+            ):
+                return True
+        return False
+
     @staticmethod
     def _find_header_band(
         signs: list[Sign],
@@ -569,7 +600,16 @@ class SignageScopeCue:
 
         # Unknown, high-confidence OCR is admitted only as a geometry
         # separator. It cannot produce evidence because its brand is None.
-        boundary_anchors = self._boundary_anchors(signs, text_detections, median_height)
+        poster_header_present = any(
+            self._is_poster_header_sign(sign, posters, instances, median_height)
+            for sign in signs
+        )
+        # Co-branded campaign headers (e.g. Oakley + Meta) are one display
+        # header, not adjacent target-brand bays. Do not use their unknown
+        # partner word as a separator in that special geometry.
+        boundary_anchors = [] if poster_header_present else self._boundary_anchors(
+            signs, text_detections, median_height
+        )
         all_input_signs = list(signs) + boundary_anchors
 
         # Filter out poster-contained signs first.
@@ -577,7 +617,9 @@ class SignageScopeCue:
         updated: list[Sign] = []
         known_sign_ids = {sign.sign_id for sign in signs}
         for sign in all_input_signs:
-            if self._poster_contains_sign(sign, posters):
+            if self._poster_contains_sign(sign, posters) and not self._is_poster_header_sign(
+                sign, posters, instances, median_height
+            ):
                 if sign.sign_id in known_sign_ids:
                     scoped = replace(sign, scope=Scope("none", None, 0.99))
                     updated.append(scoped)
@@ -657,13 +699,20 @@ class SignageScopeCue:
                     # Extend the region to cover the actual instance positions.
                     scope_region[3] = region[1] + region[3] - (header_bottom or 0.0)
 
+            poster_header = (
+                sign.confidence >= 0.45
+                and self._is_poster_header_sign(sign, posters, instances, median_height)
+            )
             # Scope confidence: how cleanly the columns separate brands.
             # If there is only one header sign (no column differentiation possible),
-            # confidence is moderate.
+            # confidence is moderate. A readable closed-set logo in a campaign
+            # banner directly above the shelf is a deliberate stronger case.
             if len(columns) <= 1:
                 scope_conf = min(0.70, sign.confidence * 0.75)
             else:
                 scope_conf = min(0.92, sign.confidence * 0.95)
+            if poster_header:
+                scope_conf = max(scope_conf, 0.75)
 
             scope = Scope("bay_header", scope_region, scope_conf)
             scoped = replace(sign, scope=scope)
@@ -677,6 +726,11 @@ class SignageScopeCue:
                 if assigned_col is None:
                     continue
                 containment_conf = self._column_containment_confidence(inst, assigned_col)
+                if poster_header:
+                    # The geometry is a single campaign header above the full
+                    # display; do not let the fuzzy OCR spelling alone force an
+                    # abstention when the closed-set logo is clearly scoped.
+                    containment_conf = max(containment_conf, 0.80)
                 evidence.append(
                     Evidence(
                         instance_id=inst.id,
@@ -691,6 +745,7 @@ class SignageScopeCue:
                             "scope": scope.to_dict(),
                             "column_left": assigned_col.left,
                             "column_right": assigned_col.right,
+                            "poster_header": poster_header,
                         },
                     )
                 )

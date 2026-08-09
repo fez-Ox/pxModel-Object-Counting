@@ -29,6 +29,17 @@ class ScopeAssociationTests(unittest.TestCase):
         self.assertEqual(scoped[0].scope.type, "row_label")
         self.assertTrue(evidence)
 
+    def test_top_campaign_poster_header_can_scope_display_below(self):
+        instances = [
+            Instance("inst_0001", [40, 40, 20, 20]),
+            Instance("inst_0002", [80, 40, 20, 20]),
+        ]
+        signs = [Sign("s_01", "Oakley", "oakley", [40, 8, 50, 12], confidence=1.0)]
+        posters = [PosterRegion([0, 0, 150, 25], 0.95)]
+        scoped, evidence = self.cue.associate(instances, signs, posters)
+        self.assertEqual(scoped[0].scope.type, "bay_header")
+        self.assertEqual({item.instance_id for item in evidence}, {"inst_0001", "inst_0002"})
+
     def test_sign_inside_poster_is_not_associated(self):
         instances = [Instance("inst_0001", [40, 40, 20, 20])]
         signs = [Sign("s_01", "Cartier", "cartier", [40, 10, 50, 12], confidence=1.0)]
