@@ -758,6 +758,24 @@ class Florence2OCRBackend:
         try:
             self._ensure_loaded()
             output = self._detect_model(source, scale=self.scale)
+            # Portrait retail photos make small shelf logos nearly invisible
+            # after the model's own image resize. Re-run one lower-display
+            # crop, without any brand prompt, and map its regions back to the
+            # source image. This remains one bounded scene-OCR pass plus one
+            # focused pass; C1 has its separate six-call budget.
+            if source.height >= 1600:
+                tile_top = round(source.height * 0.55)
+                tile = source.crop((0, tile_top, source.width, source.height))
+                for detection in self._detect_model(tile, scale=self.scale):
+                    x, y, width, height = detection.bbox
+                    output.append(
+                        TextDetection(
+                            text=detection.text,
+                            bbox=[x, y + tile_top, width, height],
+                            confidence=detection.confidence,
+                            source=detection.source,
+                        )
+                    )
         except Exception as exc:
             import sys
             print(f"WARNING Florence2 inference error: {exc}", file=sys.stderr)
