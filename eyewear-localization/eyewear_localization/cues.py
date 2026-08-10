@@ -251,7 +251,8 @@ class OnProductBrandingCue:
                     local_w,
                     local_h,
                 ]
-                combined_confidence = max(0.0, min(1.0, detection.confidence * match.score))
+                spatial_weight = self._spatial_proximity_weight(global_box, instance.bbox)
+                combined_confidence = max(0.0, min(1.0, detection.confidence * match.score * spatial_weight))
                 ev = Evidence(
                     instance_id=instance.id,
                     brand=match.brand,
@@ -263,13 +264,14 @@ class OnProductBrandingCue:
                         "crop_bbox": list(instance.bbox),
                         "match_method": match.method,
                         "ocr_confidence": detection.confidence,
+                        "spatial_weight": spatial_weight,
                         "scale_used": scale,
                     },
                 )
                 existing = best_per_brand.get(match.brand)
                 if existing is None or combined_confidence > existing[1]:
                     best_per_brand[match.brand] = (ev, combined_confidence)
-            instance_evidence = [ev for ev, _ in best_per_brand.values()]
+            instance_evidence = [ev for ev, _ in sorted(best_per_brand.values(), key=lambda item: item[1], reverse=True)]
             evidence.extend(instance_evidence)
             if self.verbose:
                 print(
@@ -277,6 +279,37 @@ class OnProductBrandingCue:
                     flush=True,
                 )
         return evidence
+
+    @staticmethod
+    def _spatial_proximity_weight(text_bbox: list[float], instance_bbox: list[float]) -> float:
+        """Weight C1 text detection based on spatial proximity to core instance box."""
+        tx, ty, tw, th = text_bbox
+        ix, iy, iw, ih = instance_bbox
+        if iw <= 0 or ih <= 0:
+            return 1.0
+
+        if ty + th < iy:
+            dy = iy - (ty + th)
+        elif ty > iy + ih:
+            dy = ty - (iy + ih)
+        else:
+            dy = 0.0
+
+        if tx + tw < ix:
+            dx = ix - (tx + tw)
+        elif tx > ix + iw:
+            dx = tx - (ix + iw)
+        else:
+            dx = 0.0
+
+        if dx == 0.0 and dy == 0.0:
+            return 1.0
+
+        vert_penalty = dy / max(1.0, 0.5 * ih)
+        horiz_penalty = dx / max(1.0, 0.5 * iw)
+        total_penalty = vert_penalty + horiz_penalty
+
+        return max(0.30, min(1.0, 1.0 - total_penalty))
 
 
 # ---------------------------------------------------------------------------

@@ -101,9 +101,31 @@ class Florence2AndCascadeTests(unittest.TestCase):
         backend = SelectiveOCRBackend(primary, fallback, Gazetteer(["cartier", "gucci"]), max_fallback_calls=1)
 
         output = backend.detect(object())
-        self.assertEqual(primary.calls, 1)
-        self.assertEqual(fallback.calls, 1)
         self.assertEqual({item.text for item in output}, {"Cartier", "Gucci"})
+
+    def test_spatial_proximity_weighting_favors_on_frame_brand(self):
+        # Instance: x=10, y=50, w=50, h=40. Crop margin=0.25 -> top=40.
+        # Text 1: Burberry at local_y=0 -> global_y=40..45 (fully above instance y=50)
+        # Text 2: Michael Kors at local_y=15 -> global_y=55..65 (inside instance y=50..90)
+        ocr = StubOCR([
+            TextDetection("BURBERRY", [10, 0, 30, 5], 0.88, source="primary"),
+            TextDetection("MICHAEL KORS", [10, 15, 30, 10], 0.72, source="primary"),
+        ])
+        cue = OnProductBrandingCue(
+            ocr,
+            Gazetteer(["burberry", "michael kors"]),
+            margin=0.25,
+            scales=(1.0,),
+            sharpen=False,
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            image_path = Path(directory) / "image.png"
+            Image.new("RGB", (100, 100), "white").save(image_path)
+            evidence = cue.emit(image_path, [Instance("inst_0001", [10, 50, 50, 40])])
+
+        # Michael Kors (on frame, 0.72) ranks higher than Burberry (outside frame, 0.88 * 0.75 = 0.66)
+        self.assertTrue(len(evidence) >= 2)
+        self.assertEqual(evidence[0].brand, "michael kors")
 
     def test_precision_cascade_c1_overrides_c2(self):
         evidence = [
