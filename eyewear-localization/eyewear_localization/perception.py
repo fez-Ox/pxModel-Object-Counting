@@ -1108,6 +1108,7 @@ class SelectiveOCRBackend:
     ) -> None:
         self.primary = primary
         self.fallback = fallback
+        self.name = f"{primary.name}+{fallback.name}-selective"
         self.gazetteer = gazetteer
         self.max_fallback_calls = max(0, int(max_fallback_calls))
         self._fallback_calls = 0
