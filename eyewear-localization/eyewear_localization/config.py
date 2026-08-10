@@ -24,7 +24,7 @@ class LocalizationConfig:
     smoothing_gate_punknown: float = 0.5
     use_vlm_audit: bool = True
     uncertainty_band: tuple[float, float] = (0.45, 0.70)
-    cascade_t1: float = 0.80
+    cascade_t1: float = 0.75
     cascade_t2: float = 0.70
     cascade_t4: float = 0.85
 
