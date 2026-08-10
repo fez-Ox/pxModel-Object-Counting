@@ -954,31 +954,10 @@ class Florence2OCRBackend:
         ocr_data = parsed_answer.get(prompt, parsed_answer.get("<OCR>", {}))
         labels = ocr_data.get("labels", []) if isinstance(ocr_data, Mapping) else []
         bboxes = ocr_data.get("bboxes", []) if isinstance(ocr_data, Mapping) else []
-        # Florence-2's OCR post-processor returns quadrilaterals under
-        # ``quad_boxes``; newer forks may normalize them to ``bboxes``.
         if not bboxes and isinstance(ocr_data, Mapping):
             bboxes = ocr_data.get("quad_boxes", [])
 
         output: list[TextDetection] = []
-        import sys
-        print(
-            "[FLORENCE] OCR parsed: "
-            f"labels={labels[:20]!r} boxes={len(bboxes)} "
-            f"raw={generated_text[:600]!r}",
-            file=sys.stderr,
-            flush=True,
-        )
-        if not (bboxes and labels and len(bboxes) == len(labels)):
-            import sys
-            print(
-                "[FLORENCE] OCR parse empty: "
-                f"answer_type={type(parsed_answer).__name__} "
-                f"keys={list(ocr_data) if isinstance(ocr_data, Mapping) else None} "
-                f"labels={len(labels)} boxes={len(bboxes)} "
-                f"raw={generated_text[:600]!r}",
-                file=sys.stderr,
-                flush=True,
-            )
         if bboxes and labels and len(bboxes) == len(labels):
             for box, text in zip(bboxes, labels):
                 text_str = str(text).replace("<s>", "").replace("</s>", "").strip()
