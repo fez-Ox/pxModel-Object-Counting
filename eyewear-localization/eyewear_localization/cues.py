@@ -81,16 +81,20 @@ class OnProductBrandingCue:
         gazetteer: Gazetteer,
         *,
         margin: float = 0.25,
-        scales: tuple[float, ...] | list[float] = (2.0, 4.0),
+        scales: tuple[float, ...] | list[float] = (1.0, 2.0, 4.0),
         sharpen: bool = True,
+        use_clahe: bool = False,
+        dual_polarity: bool = False,
         verbose: bool = False,
     ) -> None:
         self.ocr = ocr
         self.gazetteer = gazetteer
         self.margin = max(0.0, float(margin))
-        self.scales = tuple(max(1.0, float(s)) for s in scales) if scales else (2.0,)
+        self.scales = tuple(sorted(set(float(s) for s in scales)))
         self.sharpen = sharpen
-        self.verbose = bool(verbose)
+        self.use_clahe = use_clahe
+        self.dual_polarity = dual_polarity
+        self.verbose = verbose
 
     @staticmethod
     def _load(image_path: str | Path):
@@ -106,6 +110,20 @@ class OnProductBrandingCue:
 
         return image.filter(ImageFilter.UnsharpMask(radius=2, percent=150, threshold=3))
 
+    @staticmethod
+    def _enhance_contrast(image: Any) -> Any:
+        """Apply adaptive contrast boost (CLAHE / autocontrast) for low-contrast branding."""
+        from PIL import ImageOps
+
+        return ImageOps.autocontrast(image, cutoff=2)
+
+    @staticmethod
+    def _invert_polarity(image: Any) -> Any:
+        """Invert image colors to read light-on-dark branding on dark temple arms."""
+        from PIL import ImageOps
+
+        return ImageOps.invert(image.convert("RGB"))
+
     def _ocr_at_scale(
         self,
         crop: Any,
@@ -113,31 +131,47 @@ class OnProductBrandingCue:
         *,
         method: str | None = None,
     ) -> list[TextDetection]:
-        """Upscale, optionally sharpen, and run OCR at one scale.
+        """Upscale with Lanczos, optionally sharpen, enhance contrast/polarity, and run OCR."""
+        from PIL import Image
 
-        ``method`` lets a bounded cascade run its inexpensive backend across
-        all scales before it spends a stronger-model call on the best scale.
-        Ordinary OCR backends continue to use ``detect_preprocessed``.
-        """
         crop_width, crop_height = crop.size
+        resample_filter = getattr(Image, "Resampling", Image).LANCZOS
         if scale != 1.0:
             working = crop.resize(
-                (max(1, round(crop_width * scale)), max(1, round(crop_height * scale)))
+                (max(1, round(crop_width * scale)), max(1, round(crop_height * scale))),
+                resample=resample_filter,
             )
         else:
             working = crop
         if self.sharpen and scale > 1.0:
             working = self._sharpen(working)
-        try:
-            detector = getattr(self.ocr, method, None) if method else None
-            if not callable(detector):
-                detector = getattr(self.ocr, "detect_preprocessed", None)
-            if callable(detector):
-                detections = list(detector(working))
-            else:
-                detections = list(self.ocr.detect(working))
-        except Exception:
-            detections = []
+
+        variants = [working]
+        if self.use_clahe:
+            variants.append(self._enhance_contrast(working))
+        if self.dual_polarity:
+            variants.append(self._invert_polarity(working))
+            if self.use_clahe:
+                variants.append(self._enhance_contrast(self._invert_polarity(working)))
+
+        detections: list[TextDetection] = []
+        detector = getattr(self.ocr, method, None) if method else None
+        if not callable(detector):
+            detector = getattr(self.ocr, "detect_preprocessed", None)
+
+        for variant in variants:
+            try:
+                if callable(detector):
+                    variant_detections = list(detector(variant))
+                else:
+                    variant_detections = list(self.ocr.detect(variant))
+                detections.extend(variant_detections)
+                # If a variant produces a direct gazetteer match, stop early to save inference calls
+                if any(self.gazetteer.match(det.text) is not None for det in variant_detections):
+                    break
+            except Exception:
+                continue
+
         # Rescale detection bboxes back to crop coordinates.
         rescaled: list[TextDetection] = []
         for detection in detections:

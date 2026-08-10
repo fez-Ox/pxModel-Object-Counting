@@ -27,6 +27,10 @@ class LocalizationConfig:
     cascade_t1: float = 0.75
     cascade_t2: float = 0.70
     cascade_t4: float = 0.85
+    c1_scales: tuple[float, ...] = (1.0, 2.0, 4.0)
+    c1_use_clahe: bool = True
+    c1_dual_polarity: bool = True
+    florence2_model_id: str = "microsoft/Florence-2-large"
 
     def __post_init__(self) -> None:
         self.gazetteer = sorted(

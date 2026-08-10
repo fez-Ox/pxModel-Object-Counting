@@ -127,6 +127,25 @@ class Florence2AndCascadeTests(unittest.TestCase):
         self.assertTrue(len(evidence) >= 2)
         self.assertEqual(evidence[0].brand, "michael kors")
 
+    def test_build_got_ocr2_backend(self):
+        backend = build_ocr_backend("got-ocr2")
+        self.assertEqual(backend.name, "got-ocr2")
+
+    def test_c1_clahe_and_dual_polarity(self):
+        ocr = StubOCR([TextDetection("Oakley", [2, 2, 12, 5], 0.95)])
+        cue = OnProductBrandingCue(
+            ocr,
+            Gazetteer(["oakley"]),
+            use_clahe=True,
+            dual_polarity=True,
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            image_path = Path(directory) / "image.png"
+            Image.new("RGB", (100, 100), "black").save(image_path)
+            evidence = cue.emit(image_path, [Instance("inst_0001", [10, 10, 30, 20])])
+        self.assertTrue(len(evidence) >= 1)
+        self.assertEqual(evidence[0].brand, "oakley")
+
     def test_precision_cascade_c1_overrides_c2(self):
         evidence = [
             Evidence("inst_0001", "ray-ban", 0.95, "C1"),

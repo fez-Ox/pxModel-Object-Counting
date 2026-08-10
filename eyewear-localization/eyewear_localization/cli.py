@@ -101,25 +101,29 @@ def build_parser() -> argparse.ArgumentParser:
         "--ocr-backend",
         default="easyocr",
         choices=(
-            "easyocr", "florence2", "tesseract", "rapidocr", "paddleocr",
-            "tesseract+florence2", "tesseract+rapidocr", "rapidocr+florence2",
+            "easyocr", "florence2", "florence2-large", "florence2-base", "got-ocr2",
+            "tesseract", "rapidocr", "paddleocr", "tesseract+florence2", "tesseract+rapidocr",
+            "rapidocr+florence2", "rapidocr+florence2-large", "rapidocr+got-ocr2",
             "paddleocr+florence2", "easyocr+florence2", "none",
         ),
     )
+    parser.add_argument("--florence2-model-id", default="microsoft/Florence-2-large", help="HuggingFace Florence-2 model repository")
     parser.add_argument("--ocr-scale", type=float, default=2.0, help="OCR upscale factor (whole-image)")
     parser.add_argument(
         "--ocr-fallback-budget",
         type=int,
         default=6,
-        help="Maximum Florence-2 calls per image with --ocr-backend tesseract+florence2",
+        help="Maximum VLM calls per image with selective OCR backends",
     )
     parser.add_argument(
         "--ocr-cache-dir",
         help="Reuse raw text_detections from a prior OCR-only JSON run",
     )
     parser.add_argument("--c1-margin", type=float, default=None, help="C1 crop margin fraction (default 0.25)")
-    parser.add_argument("--c1-scales", default=None, help="C1 multi-scale OCR factors, comma-separated (default '2.0,4.0')")
+    parser.add_argument("--c1-scales", default=None, help="C1 multi-scale OCR factors, comma-separated (default '1.0,2.0,4.0')")
     parser.add_argument("--c1-no-sharpen", action="store_true", help="Disable post-upscale sharpening in C1")
+    parser.add_argument("--c1-no-clahe", action="store_true", help="Disable adaptive CLAHE contrast boost in C1")
+    parser.add_argument("--c1-no-dual-polarity", action="store_true", help="Disable dual light/dark polarity pass in C1")
     parser.add_argument("--sam3-checkpoint", help="Optional native SAM3 checkpoint")
     parser.add_argument("--device", default=None, help="SAM3 device, when enabled")
     parser.add_argument("--sam3-threshold", type=float, default=0.25)
@@ -226,6 +230,10 @@ def main(argv: list[str] | None = None) -> int:
         c1_kwargs["scales"] = tuple(float(s) for s in args.c1_scales.split(","))
     if args.c1_no_sharpen:
         c1_kwargs["sharpen"] = False
+    if args.c1_no_clahe:
+        c1_kwargs["use_clahe"] = False
+    if args.c1_no_dual_polarity:
+        c1_kwargs["dual_polarity"] = False
     c1 = OnProductBrandingCue(ocr, gazetteer, **c1_kwargs)
     pipeline = LocalizationPipeline(frontend, config=config, c1=c1, c4=StylePriorCue())
     output_dir = Path(args.out)

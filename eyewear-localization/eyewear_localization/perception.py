@@ -708,13 +708,27 @@ def build_ocr_backend(
             return PaddleOCRBackend(scale=scale, device="cuda" if gpu is True or gpu == "cuda" else "cpu")
         except Exception as exc:
             return NullOCRBackend(f"PaddleOCR unavailable: {exc}")
-    if name == "florence2":
+    if name in {"florence2", "florence2-large", "florence2-base"}:
         try:
             device = "cuda" if gpu is True or gpu == "cuda" else (gpu if isinstance(gpu, str) else None)
-            return Florence2OCRBackend(device=device, scale=scale)
+            model_id = "microsoft/Florence-2-base" if name == "florence2-base" else "microsoft/Florence-2-large"
+            return Florence2OCRBackend(model_id=model_id, device=device, scale=scale)
         except Exception as exc:
             return NullOCRBackend(f"Florence2 unavailable: {exc}")
-    if name in {"tesseract+rapidocr", "rapidocr+florence2", "paddleocr+florence2", "easyocr+florence2"}:
+    if name == "got-ocr2":
+        try:
+            device = "cuda" if gpu is True or gpu == "cuda" else (gpu if isinstance(gpu, str) else None)
+            return GOTOCR2Backend(device=device, scale=scale)
+        except Exception as exc:
+            return NullOCRBackend(f"GOT-OCR2 unavailable: {exc}")
+    if name in {
+        "tesseract+rapidocr",
+        "rapidocr+florence2",
+        "rapidocr+florence2-large",
+        "rapidocr+got-ocr2",
+        "paddleocr+florence2",
+        "easyocr+florence2",
+    }:
         if gazetteer is None:
             return NullOCRBackend(f"{name} requires a gazetteer")
         try:
@@ -722,15 +736,18 @@ def build_ocr_backend(
             if name == "tesseract+rapidocr":
                 primary = TesseractOCRBackend(scale=scale)
                 fallback = RapidOCRBackend(scale=scale)
-            elif name == "rapidocr+florence2":
+            elif name in {"rapidocr+florence2", "rapidocr+florence2-large"}:
                 primary = RapidOCRBackend(scale=scale)
-                fallback = Florence2OCRBackend(device=device, scale=scale)
+                fallback = Florence2OCRBackend(model_id="microsoft/Florence-2-large", device=device, scale=scale)
+            elif name == "rapidocr+got-ocr2":
+                primary = RapidOCRBackend(scale=scale)
+                fallback = GOTOCR2Backend(device=device, scale=scale)
             elif name == "paddleocr+florence2":
                 primary = PaddleOCRBackend(scale=scale, device="cuda" if gpu is True or gpu == "cuda" else "cpu")
-                fallback = Florence2OCRBackend(device=device, scale=scale)
+                fallback = Florence2OCRBackend(model_id="microsoft/Florence-2-large", device=device, scale=scale)
             else:
                 primary = EasyOCRBackend(gpu=gpu, scale=scale)
-                fallback = Florence2OCRBackend(device=device, scale=scale)
+                fallback = Florence2OCRBackend(model_id="microsoft/Florence-2-large", device=device, scale=scale)
             return SelectiveOCRBackend(
                 primary,
                 fallback,
@@ -746,7 +763,7 @@ def build_ocr_backend(
             device = "cuda" if gpu is True or gpu == "cuda" else (gpu if isinstance(gpu, str) else None)
             return SelectiveOCRBackend(
                 TesseractOCRBackend(scale=scale),
-                Florence2OCRBackend(device=device, scale=scale),
+                Florence2OCRBackend(model_id="microsoft/Florence-2-large", device=device, scale=scale),
                 gazetteer,
                 max_fallback_calls=fallback_budget,
             )
@@ -769,11 +786,12 @@ class Florence2OCRBackend:
     def __init__(
         self,
         *,
-        model_id: str = "microsoft/Florence-2-base",
+        model_id: str = "microsoft/Florence-2-large",
         device: str | None = None,
         scale: float = 1.0,
     ) -> None:
         self.model_id = model_id
+        self.name = "florence2"
         self.device = device
         self.scale = max(1.0, float(scale))
         self._processor = None
@@ -1064,6 +1082,75 @@ class Florence2OCRBackend:
         except Exception:
             output = []
         return output or self._detect_fallback(source, preprocessed=True)
+
+
+class GOTOCR2Backend:
+    """GOT-OCR2.0 zero-shot OCR backend using HuggingFace transformers."""
+
+    name = "got-ocr2"
+    reliability = 1.0
+
+    def __init__(
+        self,
+        *,
+        model_id: str = "ucaslc/GOT-OCR2_0",
+        device: str | None = None,
+        scale: float = 1.0,
+    ) -> None:
+        self.model_id = model_id
+        self.device = device
+        self.scale = max(1.0, float(scale))
+        self._tokenizer = None
+        self._model = None
+
+    def _ensure_loaded(self) -> None:
+        if self._model is not None and self._tokenizer is not None:
+            return
+        import torch
+        from transformers import AutoModel, AutoTokenizer
+
+        device_str = self.device
+        if device_str is None:
+            device_str = "cuda" if torch.cuda.is_available() else "cpu"
+        torch_dtype = torch.float16 if "cuda" in device_str else torch.float32
+
+        self._tokenizer = AutoTokenizer.from_pretrained(self.model_id, trust_remote_code=True)
+        self._model = (
+            AutoModel.from_pretrained(
+                self.model_id,
+                trust_remote_code=True,
+                low_cpu_mem_usage=True,
+                torch_dtype=torch_dtype,
+                use_safetensors=True,
+                pad_token_id=self._tokenizer.eos_token_id,
+            )
+            .eval()
+            .to(device_str)
+        )
+        self.actual_device = device_str
+
+    def detect(self, image: Any) -> list[TextDetection]:
+        source = Florence2OCRBackend._image(image)
+        width, height = source.size
+        try:
+            self._ensure_loaded()
+            res = self._model.chat(self._tokenizer, source, ocr_type="ocr")
+            if res and str(res).strip():
+                return [
+                    TextDetection(
+                        text=str(res).strip(),
+                        bbox=[0.0, 0.0, float(width), float(height)],
+                        confidence=0.90,
+                        source=self.name,
+                    )
+                ]
+        except Exception as exc:
+            import sys
+            print(f"WARNING GOT-OCR2 inference error: {exc}", file=sys.stderr)
+        return []
+
+    def detect_preprocessed(self, image: Any) -> list[TextDetection]:
+        return self.detect(image)
 
 
 class SelectiveOCRBackend:
