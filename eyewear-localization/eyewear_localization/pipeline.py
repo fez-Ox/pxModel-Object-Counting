@@ -65,10 +65,11 @@ class LocalizationPipeline:
             image_path,
             text_detections_override=text_detections_override,
         )
+        l0_elapsed = time.perf_counter() - started
         if verbose:
             print(
                 f"[PIPE] L0 done instances={len(perception.instances)} "
-                f"signs={len(perception.signs)} elapsed={time.perf_counter() - started:.1f}s",
+                f"signs={len(perception.signs)} elapsed={l0_elapsed:.1f}s",
                 flush=True,
             )
 
@@ -92,6 +93,7 @@ class LocalizationPipeline:
         c1_evidence = self._safe(
             self.c1.emit, [], image_path, perception.instances
         )
+        c1_elapsed = time.perf_counter() - c1_started
         if verbose:
             print(
                 f"[PIPE] C1 done evidence={len(c1_evidence)} "
@@ -158,6 +160,23 @@ class LocalizationPipeline:
                 info["reason"] = str(reason)
             return info
 
+        total_elapsed = time.perf_counter() - started
+        c2_c4_fusion_elapsed = total_elapsed - l0_elapsed - c1_elapsed
+        timings = {
+            "l0_perception_seconds": round(l0_elapsed, 3),
+            "c1_onproduct_seconds": round(c1_elapsed, 3),
+            "c2_c4_fusion_seconds": round(max(0.0, c2_c4_fusion_elapsed), 3),
+            "brand_association_total_seconds": round(c1_elapsed + max(0.0, c2_c4_fusion_elapsed), 3),
+            "total_pipeline_seconds": round(total_elapsed, 3),
+        }
+        if verbose:
+            print(
+                f"[PIPE] finished image={image_path.name} "
+                f"brand_association={timings['brand_association_total_seconds']}s "
+                f"total={timings['total_pipeline_seconds']}s",
+                flush=True,
+            )
+
         result: dict[str, Any] = {
             "schema_version": "1.0",
             "image": source or str(image_path),
@@ -173,6 +192,7 @@ class LocalizationPipeline:
                 "ocr": backend_info(self.frontend.ocr),
                 "poster_detector": backend_info(self.frontend.poster_detector),
             },
+            "timings": timings,
             "effective_config": self.config.to_dict(),
         }
         return result
