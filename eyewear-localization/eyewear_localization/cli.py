@@ -75,6 +75,13 @@ def set_overrides_from_args(args: argparse.Namespace) -> dict[str, Any]:
         ("scene.person_threshold", "person_threshold"),
         ("scene.poster_threshold", "poster_threshold"),
         ("scene.shelf_threshold", "shelf_threshold"),
+        ("cascade.c1_threshold", "cascade_c1_threshold"),
+        ("cascade.c2_threshold", "cascade_c2_threshold"),
+        ("cascade.c4_threshold", "cascade_c4_threshold"),
+        ("c1.margin", "c1_margin"),
+        ("c1.wide_margin", "c1_wide_margin"),
+        ("ocr.scale", "ocr_scale"),
+        ("ocr.fallback_budget", "ocr_fallback_budget"),
         ("performance.c1_batch_size", "c1_batch_size"),
         ("performance.sam3_prompt_batch_size", "sam3_prompt_batch_size"),
         ("performance.sam3_compile", "sam3_compile"),
@@ -111,11 +118,11 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument("--florence2-model-id", default="microsoft/Florence-2-large", help="HuggingFace Florence-2 model repository")
-    parser.add_argument("--ocr-scale", type=float, default=2.0, help="OCR upscale factor (whole-image)")
+    parser.add_argument("--ocr-scale", type=float, default=None, help="OCR upscale factor (whole-image)")
     parser.add_argument(
         "--ocr-fallback-budget",
         type=int,
-        default=6,
+        default=None,
         help="Maximum VLM calls per image with selective OCR backends",
     )
     parser.add_argument(
@@ -123,6 +130,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="Reuse raw text_detections from a prior OCR-only JSON run",
     )
     parser.add_argument("--c1-margin", type=float, default=None, help="C1 crop margin fraction (default 0.25)")
+    parser.add_argument("--c1-wide-margin", type=float, default=None, help="Wider retry crop margin for unresolved C1 logos (default 0.40)")
     parser.add_argument("--c1-scales", default=None, help="C1 multi-scale OCR factors, comma-separated (default '1.0,2.0,4.0')")
     parser.add_argument(
         "--c1-batch-size", type=int, default=None,
@@ -166,6 +174,9 @@ def build_parser() -> argparse.ArgumentParser:
         ("--person-threshold", "scene.person_threshold", float),
         ("--poster-threshold", "scene.poster_threshold", float),
         ("--shelf-threshold", "scene.shelf_threshold", float),
+        ("--cascade-c1-threshold", "cascade.c1_threshold", float),
+        ("--cascade-c2-threshold", "cascade.c2_threshold", float),
+        ("--cascade-c4-threshold", "cascade.c4_threshold", float),
     ):
         parser.add_argument(flag, type=kind, default=None, help=f"Override {_key}")
     parser.add_argument(
@@ -210,6 +221,12 @@ def main(argv: list[str] | None = None) -> int:
         if args.c1_batch_size is not None
         else int(performance.get("c1_batch_size", config.c1_batch_size))
     )
+    ocr_scale = args.ocr_scale if args.ocr_scale is not None else config.ocr_scale
+    ocr_fallback_budget = (
+        args.ocr_fallback_budget
+        if args.ocr_fallback_budget is not None
+        else config.ocr_fallback_budget
+    )
     sam3_prompt_batch_size = (
         args.sam3_prompt_batch_size
         if args.sam3_prompt_batch_size is not None
@@ -224,9 +241,9 @@ def main(argv: list[str] | None = None) -> int:
     ocr = build_ocr_backend(
         args.ocr_backend,
         gpu=args.device == "cuda",
-        scale=args.ocr_scale,
+        scale=ocr_scale,
         gazetteer=gazetteer,
-        fallback_budget=args.ocr_fallback_budget,
+        fallback_budget=ocr_fallback_budget,
     )
     if args.sam3_checkpoint:
         localizer = build_native_sam3_localizer(
@@ -257,9 +274,17 @@ def main(argv: list[str] | None = None) -> int:
     c1_kwargs: dict[str, Any] = {
         "verbose": bool(getattr(localizer, "verbose", False)),
         "batch_size": c1_batch_size,
+        "margin": config.c1_margin,
+        "wide_margin": config.c1_wide_margin,
+        "scales": config.c1_scales,
+        "sharpen": True,
+        "use_clahe": config.c1_use_clahe,
+        "dual_polarity": config.c1_dual_polarity,
     }
     if args.c1_margin is not None:
         c1_kwargs["margin"] = args.c1_margin
+    if args.c1_wide_margin is not None:
+        c1_kwargs["wide_margin"] = args.c1_wide_margin
     if args.c1_scales is not None:
         c1_kwargs["scales"] = tuple(float(s) for s in args.c1_scales.split(","))
     if args.c1_no_sharpen:

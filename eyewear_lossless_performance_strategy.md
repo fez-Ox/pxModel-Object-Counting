@@ -9,7 +9,17 @@ Speed up **execution scheduling**, not perception or attribution policy:
 3. Enable `torch.compile` only for a model path that passes a strict output-parity gate.
 4. Keep a sequential fallback for every optimized path.
 
-This retains every required SAM3 prompt, shelf filter, C1 crop, C1 transform, OCR generation setting, gazetteer match, C2 computation, and precision-cascade decision. The implementation is exposed through `--c1-batch-size`, `--sam3-prompt-batch-size`, and `--sam3-compile`; all default to the reference-safe value (`1`/disabled) until the parity corpus has approved a faster setting. Backend errors and malformed batch responses replay the sequential path.
+This retains every required SAM3 prompt, shelf filter, C1 crop, C1 transform, OCR generation setting, gazetteer match, C2 computation, and precision-cascade decision. The implementation is exposed through `--c1-batch-size`, `--sam3-prompt-batch-size`, and `--sam3-compile`; the lossless profile remains available with batch size `1` and compilation disabled. Backend errors and malformed batch responses replay the sequential path.
+
+## Current local quality-tuning profile
+
+The local deployment configuration now intentionally uses a separate quality/
+throughput profile rather than claiming exact lossless parity. It raises C1
+reliability over C2, lowers the C1 cascade gate for weak physical-logo reads,
+uses deterministic multi-scale/contrast/polarity crop OCR with a wider retry
+crop, raises the bounded fallback budget to 12, and configures C1/SAM3 batches
+at 4 with sequential fallback. This profile has been tested locally only;
+Kaggle validation and speed measurements require explicit approval.
 
 ## What the analysis and implementation show
 

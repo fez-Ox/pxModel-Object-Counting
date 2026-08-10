@@ -71,6 +71,8 @@ class OnProductBrandingCue:
       gazetteer-matching detection per instance.
     * Paragraph-mode second pass to merge fragmented partial detections
       on temples (e.g. "CAR" + "TIER" → "CARTIER").
+    * A wider retry crop for unresolved logos so temple-arm text just outside
+      the localization box can still be read without widening every crop.
     """
 
     name = "C1"
@@ -81,6 +83,7 @@ class OnProductBrandingCue:
         gazetteer: Gazetteer,
         *,
         margin: float = 0.25,
+        wide_margin: float = 0.40,
         scales: tuple[float, ...] | list[float] = (1.0, 2.0, 4.0),
         sharpen: bool = True,
         use_clahe: bool = False,
@@ -91,6 +94,7 @@ class OnProductBrandingCue:
         self.ocr = ocr
         self.gazetteer = gazetteer
         self.margin = max(0.0, float(margin))
+        self.wide_margin = max(self.margin, float(wide_margin))
         self.scales = tuple(sorted(set(float(s) for s in scales)))
         self.sharpen = sharpen
         self.use_clahe = use_clahe
@@ -303,6 +307,46 @@ class OnProductBrandingCue:
                 continue
         return output
 
+    @staticmethod
+    def _crop_for_instance(
+        image: Any,
+        instance: Instance,
+        width: int,
+        height: int,
+        margin: float,
+    ) -> tuple[float, float, Any]:
+        x, y, box_width, box_height = instance.bbox
+        margin_x = box_width * margin
+        margin_y = box_height * margin
+        left = max(0.0, x - margin_x)
+        top = max(0.0, y - margin_y)
+        right = min(float(width), x + box_width + margin_x)
+        bottom = min(float(height), y + box_height + margin_y)
+        return left, top, image.crop((round(left), round(top), round(right), round(bottom)))
+
+    @staticmethod
+    def _translate_detections(
+        detections: list[TextDetection],
+        offset_x: float,
+        offset_y: float,
+    ) -> list[TextDetection]:
+        if offset_x == 0.0 and offset_y == 0.0:
+            return detections
+        return [
+            TextDetection(
+                text=detection.text,
+                bbox=[
+                    detection.bbox[0] + offset_x,
+                    detection.bbox[1] + offset_y,
+                    detection.bbox[2],
+                    detection.bbox[3],
+                ],
+                confidence=detection.confidence,
+                source=detection.source,
+            )
+            for detection in detections
+        ]
+
     def emit(self, image_path: str | Path, instances: list[Instance]) -> list[Evidence]:
         image = self._load(image_path)
         width, height = image.size
@@ -313,21 +357,15 @@ class OnProductBrandingCue:
         # Crop geometry and pixels are prepared once.  The scheduler below
         # batches only independent OCR work; it never removes an instance or
         # changes the crop, scale, variant, threshold, or fallback budget.
-        crops: list[tuple[Instance, float, float, Any]] = []
+        crops: list[tuple[Instance, float, float, Any, float, float, Any]] = []
         for instance in instances:
-            x, y, box_width, box_height = instance.bbox
-            margin_x = box_width * self.margin
-            margin_y = box_height * self.margin
-            left = max(0.0, x - margin_x)
-            top = max(0.0, y - margin_y)
-            right = min(float(width), x + box_width + margin_x)
-            bottom = min(float(height), y + box_height + margin_y)
-            crops.append((
-                instance,
-                left,
-                top,
-                image.crop((round(left), round(top), round(right), round(bottom))),
-            ))
+            left, top, crop = self._crop_for_instance(
+                image, instance, width, height, self.margin
+            )
+            wide_left, wide_top, wide_crop = self._crop_for_instance(
+                image, instance, width, height, self.wide_margin
+            )
+            crops.append((instance, left, top, crop, wide_left, wide_top, wide_crop))
 
         all_detections: list[list[tuple[TextDetection, float]]] = [
             [] for _ in crops
@@ -364,7 +402,7 @@ class OnProductBrandingCue:
         # an EasyOCR-specific compatibility path and does not invoke the VLM.
         if self.scales:
             best_scale = max(self.scales)
-            for index, (_instance, _left, _top, crop) in enumerate(crops):
+            for index, (_instance, _left, _top, crop, _wide_left, _wide_top, _wide_crop) in enumerate(crops):
                 for detection in self._ocr_paragraph_pass(crop, best_scale):
                     all_detections[index].append((detection, best_scale))
 
@@ -390,26 +428,38 @@ class OnProductBrandingCue:
                     # single-image fallback path may consume more than one
                     # variant call for a crop, so replay it in reference order.
                     for index in fallback_indices:
+                        _instance, left, top, _crop, wide_left, wide_top, wide_crop = crops[index]
                         detections = self._ocr_at_scale(
-                            crops[index][3],
+                            wide_crop,
                             best_scale,
                             method="detect_fallback_preprocessed",
+                        )
+                        detections = self._translate_detections(
+                            detections,
+                            wide_left - left,
+                            wide_top - top,
                         )
                         all_detections[index].extend(
                             (detection, best_scale) for detection in detections
                         )
                 else:
                     fallback_results = self._ocr_at_scale_batch(
-                        [crops[index][3] for index in fallback_indices],
+                        [crops[index][6] for index in fallback_indices],
                         best_scale,
                         method="detect_fallback_preprocessed",
                     )
                     for index, detections in zip(fallback_indices, fallback_results):
+                        _instance, left, top, _crop, wide_left, wide_top, _wide_crop = crops[index]
+                        detections = self._translate_detections(
+                            detections,
+                            wide_left - left,
+                            wide_top - top,
+                        )
                         all_detections[index].extend(
                             (detection, best_scale) for detection in detections
                         )
 
-        for index, (instance, left, top, _crop) in enumerate(crops):
+        for index, (instance, left, top, _crop, _wide_left, _wide_top, _wide_crop) in enumerate(crops):
             # For each brand, keep only the highest-confidence match across
             # all scales and modes. This avoids duplicate evidence while
             # allowing different scales to succeed on different text.

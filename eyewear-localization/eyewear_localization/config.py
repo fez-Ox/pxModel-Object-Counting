@@ -13,7 +13,7 @@ from eyewear_localization.gazetteer import normalize_text
 class LocalizationConfig:
     gazetteer: list[str] = field(default_factory=list)
     cue_reliability: dict[str, float] = field(
-        default_factory=lambda: {"C1": 0.95, "C2": 0.85, "C4": 0.35, "L3": 0.70}
+        default_factory=lambda: {"C1": 0.95, "C2": 0.30, "C4": 0.35, "L3": 0.70}
     )
     temperature: float = 0.6
     unknown_prior: float = 0.35
@@ -24,17 +24,21 @@ class LocalizationConfig:
     smoothing_gate_punknown: float = 0.5
     use_vlm_audit: bool = True
     uncertainty_band: tuple[float, float] = (0.45, 0.70)
-    cascade_t1: float = 0.75
-    cascade_t2: float = 0.70
+    cascade_t1: float = 0.70
+    cascade_t2: float = 0.75
     cascade_t4: float = 0.85
+    c1_margin: float = 0.25
+    c1_wide_margin: float = 0.40
     c1_scales: tuple[float, ...] = (1.0, 2.0, 4.0)
     c1_use_clahe: bool = True
     c1_dual_polarity: bool = True
+    ocr_scale: float = 2.0
+    ocr_fallback_budget: int = 12
     florence2_model_id: str = "microsoft/Florence-2-large"
-    # Safe defaults retain the reference sequential execution.  Batch sizes
-    # are explicit deployment knobs and are enabled only after parity checks.
-    c1_batch_size: int = 1
-    sam3_prompt_batch_size: int = 1
+    # Batched deployment defaults retain per-chunk sequential fallback when a
+    # backend cannot safely batch, but use the approved larger micro-batches.
+    c1_batch_size: int = 4
+    sam3_prompt_batch_size: int = 4
     sam3_compile: bool = False
 
     def __post_init__(self) -> None:
@@ -46,6 +50,22 @@ class LocalizationConfig:
             self.sam3_prompt_batch_size, "sam3_prompt_batch_size"
         )
         self.sam3_compile = bool(self.sam3_compile)
+        self.cascade_t1 = _probability(self.cascade_t1, "cascade.c1_threshold")
+        self.cascade_t2 = _probability(self.cascade_t2, "cascade.c2_threshold")
+        self.cascade_t4 = _probability(self.cascade_t4, "cascade.c4_threshold")
+        self.c1_margin = _nonnegative(self.c1_margin, "c1.margin")
+        self.c1_wide_margin = _nonnegative(self.c1_wide_margin, "c1.wide_margin")
+        if self.c1_wide_margin < self.c1_margin:
+            raise ValueError("c1.wide_margin must be at least c1.margin")
+        self.c1_scales = tuple(sorted({float(scale) for scale in self.c1_scales}))
+        if not self.c1_scales or any(scale <= 0 for scale in self.c1_scales):
+            raise ValueError("c1.scales must contain positive values")
+        self.ocr_scale = float(self.ocr_scale)
+        if self.ocr_scale <= 0:
+            raise ValueError("ocr.scale must be greater than zero")
+        self.ocr_fallback_budget = _positive_int(
+            self.ocr_fallback_budget, "ocr.fallback_budget"
+        )
         for name, value in self.cue_reliability.items():
             self.cue_reliability[name] = _probability(value, name=f"cue_reliability.{name}")
         if self.temperature <= 0:
@@ -84,6 +104,20 @@ class LocalizationConfig:
             "cascade": {
                 "use_vlm_audit": self.use_vlm_audit,
                 "uncertainty_band": list(self.uncertainty_band),
+                "c1_threshold": self.cascade_t1,
+                "c2_threshold": self.cascade_t2,
+                "c4_threshold": self.cascade_t4,
+            },
+            "c1": {
+                "margin": self.c1_margin,
+                "wide_margin": self.c1_wide_margin,
+                "scales": list(self.c1_scales),
+                "use_clahe": self.c1_use_clahe,
+                "dual_polarity": self.c1_dual_polarity,
+            },
+            "ocr": {
+                "scale": self.ocr_scale,
+                "fallback_budget": self.ocr_fallback_budget,
             },
             "performance": {
                 "c1_batch_size": self.c1_batch_size,
@@ -149,13 +183,15 @@ def config_from_mapping(raw: Mapping[str, Any]) -> LocalizationConfig:
     smoothing = _mapping(raw.get("smoothing"), "smoothing")
     cascade = _mapping(raw.get("cascade"), "cascade")
     performance = _mapping(raw.get("performance"), "performance")
+    c1 = _mapping(raw.get("c1"), "c1")
+    ocr = _mapping(raw.get("ocr"), "ocr")
     band = cascade.get("uncertainty_band", (0.45, 0.70))
     return LocalizationConfig(
         gazetteer=list(raw.get("gazetteer", [])),
         cue_reliability=dict(
             raw.get(
                 "cue_reliability",
-                {"C1": 0.95, "C2": 0.85, "C4": 0.35, "L3": 0.70},
+                {"C1": 0.95, "C2": 0.30, "C4": 0.35, "L3": 0.70},
             )
         ),
         temperature=float(fusion.get("temperature", 0.6)),
@@ -167,9 +203,19 @@ def config_from_mapping(raw: Mapping[str, Any]) -> LocalizationConfig:
         smoothing_gate_punknown=float(smoothing.get("gate_punknown", 0.5)),
         use_vlm_audit=bool(cascade.get("use_vlm_audit", True)),
         uncertainty_band=(float(band[0]), float(band[1])),
-        c1_batch_size=_positive_int(performance.get("c1_batch_size", 1), "performance.c1_batch_size"),
+        cascade_t1=float(cascade.get("c1_threshold", 0.70)),
+        cascade_t2=float(cascade.get("c2_threshold", 0.75)),
+        cascade_t4=float(cascade.get("c4_threshold", 0.85)),
+        c1_margin=float(c1.get("margin", 0.25)),
+        c1_wide_margin=float(c1.get("wide_margin", 0.40)),
+        c1_scales=tuple(float(scale) for scale in c1.get("scales", (1.0, 2.0, 4.0))),
+        c1_use_clahe=bool(c1.get("use_clahe", True)),
+        c1_dual_polarity=bool(c1.get("dual_polarity", True)),
+        ocr_scale=float(ocr.get("scale", 2.0)),
+        ocr_fallback_budget=_positive_int(ocr.get("fallback_budget", 12), "ocr.fallback_budget"),
+        c1_batch_size=_positive_int(performance.get("c1_batch_size", 4), "performance.c1_batch_size"),
         sam3_prompt_batch_size=_positive_int(
-            performance.get("sam3_prompt_batch_size", 1),
+            performance.get("sam3_prompt_batch_size", 4),
             "performance.sam3_prompt_batch_size",
         ),
         sam3_compile=bool(performance.get("sam3_compile", False)),

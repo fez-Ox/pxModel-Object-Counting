@@ -173,6 +173,25 @@ class Florence2AndCascadeTests(unittest.TestCase):
         self.assertEqual(len(evidence), 1)
         self.assertEqual(evidence[0].brand, "cartier")
 
+    def test_unresolved_c1_uses_wider_retry_crop_coordinates(self):
+        ocr = C1CascadeStub()
+        cue = OnProductBrandingCue(
+            ocr,
+            Gazetteer(["cartier"]),
+            margin=0.0,
+            wide_margin=0.5,
+            scales=(1.0,),
+            sharpen=False,
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            image_path = Path(directory) / "image.png"
+            Image.new("RGB", (100, 100), "white").save(image_path)
+            evidence = cue.emit(image_path, [Instance("inst_0001", [10, 10, 30, 20])])
+
+        # The wide retry begins at x=0 while the base crop begins at x=10;
+        # the emitted global OCR box must retain the wider crop's origin.
+        self.assertEqual(evidence[0].support["text_bbox"][0], 1.0)
+
     def test_selective_fallback_keeps_order_sensitive_budget_sequential(self):
         primary = StubOCR([TextDetection("unrelated", [1, 1, 10, 5], 0.9, source="primary")])
         fallback = StubOCR([TextDetection("unrelated", [1, 1, 10, 5], 0.9, source="fallback")])

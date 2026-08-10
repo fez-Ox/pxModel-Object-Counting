@@ -21,6 +21,9 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(config.gazetteer, ["cartier"])
         self.assertFalse(config.use_vlm_audit)
         self.assertEqual(config.uncertainty_band, (0.45, 0.7))
+        self.assertEqual(config.cascade_t1, 0.70)
+        self.assertEqual(config.cascade_t2, 0.75)
+        self.assertEqual(config.c1_scales, (1.0, 2.0, 4.0))
 
 
 class OverrideTests(unittest.TestCase):
@@ -80,6 +83,31 @@ class OverrideTests(unittest.TestCase):
         self.assertEqual(overrides["fusion"]["tau"], 0.9, "sugar overrides --set")
         self.assertEqual(overrides["fusion"]["margin"], 0.2)
         self.assertEqual(overrides["cue_reliability"]["C1"], 0.7)
+
+    def test_refined_c1_defaults(self):
+        config = LocalizationConfig()
+        self.assertEqual(config.cue_reliability["C1"], 0.95)
+        self.assertEqual(config.cue_reliability["C2"], 0.30)
+        self.assertEqual(config.c1_margin, 0.25)
+        self.assertEqual(config.c1_wide_margin, 0.40)
+        self.assertEqual(config.c1_scales, (1.0, 2.0, 4.0))
+        self.assertTrue(config.c1_use_clahe)
+        self.assertTrue(config.c1_dual_polarity)
+        self.assertEqual(config.ocr_fallback_budget, 12)
+        self.assertEqual(config.c1_batch_size, 4)
+        self.assertEqual(config.sam3_prompt_batch_size, 4)
+
+    def test_refined_c1_overrides_round_trip(self):
+        new = self.config.with_overrides({
+            "cascade": {"c1_threshold": 0.65, "c2_threshold": 0.80},
+            "c1": {"wide_margin": 0.5, "scales": [1.0, 3.0]},
+            "ocr": {"fallback_budget": 16},
+        })
+        self.assertEqual(new.cascade_t1, 0.65)
+        self.assertEqual(new.cascade_t2, 0.80)
+        self.assertEqual(new.c1_wide_margin, 0.5)
+        self.assertEqual(new.c1_scales, (1.0, 3.0))
+        self.assertEqual(new.ocr_fallback_budget, 16)
 
     def test_performance_overrides_round_trip(self):
         new = self.config.with_overrides({

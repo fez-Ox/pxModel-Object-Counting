@@ -19,8 +19,8 @@ gazetteer:
   - tiffany & co
 
 cue_reliability:
-  C1: 0.7
-  C2: 0.55
+  C1: 0.95
+  C2: 0.30
   C4: 0.35
   L3: 0.70
 
@@ -38,10 +38,24 @@ smoothing:
 cascade:
   use_vlm_audit: true
   uncertainty_band: [0.45, 0.70]
+  c1_threshold: 0.70
+  c2_threshold: 0.75
+  c4_threshold: 0.85
 
-# Keep the reference path by default. Increase these only after the parity
-# protocol in eyewear_lossless_performance_strategy.md passes on the target GPU.
+c1:
+  margin: 0.25
+  wide_margin: 0.40
+  scales: [1.0, 2.0, 4.0]
+  use_clahe: true
+  dual_polarity: true
+
+ocr:
+  scale: 2.0
+  fallback_budget: 12
+
+# Batched deployment defaults. Each backend retains sequential fallback for
+# unsupported, malformed, or failed batches.
 performance:
-  c1_batch_size: 1
-  sam3_prompt_batch_size: 1
+  c1_batch_size: 4
+  sam3_prompt_batch_size: 4
   sam3_compile: false

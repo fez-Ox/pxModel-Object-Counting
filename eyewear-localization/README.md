@@ -61,29 +61,38 @@ Florence-2 to every crop:
 
 ```bash
 uv run python infer.py image.jpg --ocr-backend rapidocr+florence2 \
-  --ocr-fallback-budget 6
+  --ocr-fallback-budget 12
 ```
 
-It runs Tesseract first, then performs one Florence-2 scene pass so a match for
+It runs RapidOCR first, then performs one Florence-2 scene pass so a match for
 one bay cannot hide a missed sibling brand. Remaining budget is available for
-unmatched C1 crops; C1 runs Tesseract at all configured scales before spending
-at most one Florence-2 call on an unmatched instance. Florence output remains
-OCR evidence and is still closed-set gazetteer-gated.
+unmatched or weak C1 crops; C1 uses deterministic 1x/2x/4x crop variants,
+sharpening, contrast, polarity variants, and a wider retry crop before spending
+up to twelve bounded Florence-2 calls. Florence output remains OCR evidence and
+is still closed-set gazetteer-gated.
 
-The lossless performance controls are opt-in and default to the reference-safe
-sequential path. After the parity protocol in
-`../eyewear_lossless_performance_strategy.md` passes on the target GPU, try:
+The configured deployment micro-batches are C1 batch size 4 and SAM3 prompt
+batch size 4. Override them explicitly when comparing configurations:
 
 ```bash
 uv run python infer.py image.jpg --sam3-checkpoint ../sam3-verbose-counting/checkpoints/sam3.pt \
-  --ocr-backend florence2 --c1-batch-size 2 --sam3-prompt-batch-size 2
+  --ocr-backend florence2 --c1-batch-size 4 --sam3-prompt-batch-size 4
 ```
 
 C1 batches independent Florence crop calls; SAM3 batches separate prompt
 entries, never comma-joined prompts. Any malformed batch, OOM, or unsupported
-backend replays the sequential call. `--sam3-compile` additionally opts into
-the native SAM3 vision compiler and falls back to the uncompiled model if
-compilation is unavailable.
+backend replays the sequential call. `--sam3-compile` remains separately
+opt-in and falls back to the uncompiled model if compilation is unavailable.
+
+To report latency and speedup against a reference result directory:
+
+```bash
+uv run python scripts/report_speedup.py reference/outputs optimized/outputs
+```
+
+The report includes mean, median, p90, minimum, maximum, total latency, per-image
+latency reduction, percentage speedup, and speedup factor for L0, C1, C2/fusion,
+brand association, and the full pipeline.
 
 For a sequential Kaggle workflow, save the OCR JSON first and reuse it while
 SAM3 runs:

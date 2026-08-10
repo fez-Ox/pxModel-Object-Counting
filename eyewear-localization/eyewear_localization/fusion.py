@@ -143,8 +143,8 @@ def decide(
         grouped[item.instance_id].append(item)
     outputs: list[AttributionOutput] = []
 
-    t1 = getattr(config, "cascade_t1", 0.80)
-    t2 = getattr(config, "cascade_t2", 0.70)
+    t1 = getattr(config, "cascade_t1", 0.70)
+    t2 = getattr(config, "cascade_t2", 0.75)
     t4 = getattr(config, "cascade_t4", 0.85)
 
     for instance in instances:
