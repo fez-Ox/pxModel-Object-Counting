@@ -249,8 +249,15 @@ class OnProductBrandingCue:
                 else None
             )
             for scale in self.scales:
-                for detection in self._ocr_at_scale(crop, scale, method=primary_method):
+                scale_detections = self._ocr_at_scale(crop, scale, method=primary_method)
+                for detection in scale_detections:
                     all_detections.append((detection, scale))
+                if any(
+                    (match := self.gazetteer.match(det.text)) is not None
+                    and det.confidence * match.score >= 0.50
+                    for det in scale_detections
+                ):
+                    break
             # Paragraph pass at the largest scale to catch merged fragments.
             if self.scales:
                 best_scale = max(self.scales)

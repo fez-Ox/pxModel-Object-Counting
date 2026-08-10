@@ -89,7 +89,7 @@ class PipelineTests(unittest.TestCase):
 
     def test_ocr_evidence_is_fused_but_instance_scope_is_not_assumed(self):
         def predictor(path: Path, prompt: str):
-            if prompt == "sunglasses":
+            if "sunglasses" in prompt:
                 return {"boxes": [[20, 45, 60, 75]], "scores": [0.9]}
             return {"boxes": [], "scores": []}
 

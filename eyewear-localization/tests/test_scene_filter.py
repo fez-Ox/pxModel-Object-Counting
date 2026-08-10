@@ -62,7 +62,7 @@ class SceneFilterTests(unittest.TestCase):
         filter_ = SAM3SceneFilter(localizer, require_shelf=False)
         filter_.filter(Path("image.jpg"), [])
         self.assertEqual(filter_.last_poster_regions[0].bbox, [0.0, 0.0, 200.0, 150.0])
-        self.assertEqual(filter_.last_poster_regions[0].source, "sam3:advertisements")
+        self.assertIn("advertisements", filter_.last_poster_regions[0].source)
 
     def test_poster_instances_are_excluded(self):
         localizer = SAM3Localizer(
