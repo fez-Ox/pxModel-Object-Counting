@@ -307,12 +307,20 @@ def suppress_redundant_boxes(
 class Sam3VerboseCounter:
     """Persistent native SAM3 image counter."""
 
-    def __init__(self, checkpoint: Path, device: str, threshold: float, amp: bool = True):
+    def __init__(
+        self,
+        checkpoint: Path,
+        device: str,
+        threshold: float,
+        amp: bool = True,
+        compile_model: bool = False,
+    ):
         import torch
 
         self.torch = torch
         self.device = torch.device(device)
         self.amp = bool(amp and self.device.type == "cuda")
+        self.compile_model = bool(compile_model)
         self.threshold = float(threshold)
         self.checkpoint = Path(checkpoint)
         self.model = None
@@ -327,11 +335,26 @@ class Sam3VerboseCounter:
         from sam3.model.sam3_image_processor import Sam3Processor
         from sam3.model_builder import build_sam3_image_model
 
-        self.model = build_sam3_image_model(
-            checkpoint_path=str(self.checkpoint),
-            device=str(self.device),
-            eval_mode=True,
-        )
+        try:
+            self.model = build_sam3_image_model(
+                checkpoint_path=str(self.checkpoint),
+                device=str(self.device),
+                eval_mode=True,
+                compile=self.compile_model,
+            )
+        except Exception:
+            if not self.compile_model:
+                raise
+            # Compilation is an optional execution optimization.  A failed
+            # compiler/Triton path must retain the uncompiled reference model.
+            self.compile_model = False
+            print("[SAM3] compile unavailable; using uncompiled model", file=sys.stderr, flush=True)
+            self.model = build_sam3_image_model(
+                checkpoint_path=str(self.checkpoint),
+                device=str(self.device),
+                eval_mode=True,
+                compile=False,
+            )
         self.processor = Sam3Processor(
             self.model,
             device=self.device,
@@ -496,6 +519,135 @@ class Sam3VerboseCounter:
             )
         return result
 
+    def infer_prompts(
+        self,
+        image_path: Path,
+        prompts: list[str] | tuple[str, ...],
+        *,
+        box_cleanup: bool = True,
+        box_duplicate_iou: float = 0.9,
+        box_min_children: int = 2,
+        box_min_area_ratio: float = 1.25,
+    ) -> list[dict]:
+        """Run separate prompts as one micro-batch over a cached image.
+
+        The method is intentionally limited to independent target prompts;
+        filter prompts and prompt-specific policies remain in the caller.  If
+        the native processor does not support batching, it replays ``infer``
+        one prompt at a time.
+        """
+        prompt_list = list(prompts)
+        if not prompt_list:
+            return []
+        if len(prompt_list) == 1:
+            return [
+                self.infer(
+                    image_path,
+                    prompt_list[0],
+                    box_cleanup=box_cleanup,
+                    box_duplicate_iou=box_duplicate_iou,
+                    box_min_children=box_min_children,
+                    box_min_area_ratio=box_min_area_ratio,
+                )
+            ]
+        if not hasattr(self.processor, "set_text_prompts"):
+            return [
+                self.infer(
+                    image_path,
+                    prompt,
+                    box_cleanup=box_cleanup,
+                    box_duplicate_iou=box_duplicate_iou,
+                    box_min_children=box_min_children,
+                    box_min_area_ratio=box_min_area_ratio,
+                )
+                for prompt in prompt_list
+            ]
+
+        torch = self.torch
+        is_cuda = self.device.type == "cuda"
+        if is_cuda:
+            torch.cuda.synchronize(self.device)
+            torch.cuda.reset_peak_memory_stats(self.device)
+        started = time.perf_counter()
+        state = None
+        try:
+            with torch.inference_mode(), self._autocast():
+                state = self._image_state(image_path)
+                raw_results = self.processor.set_text_prompts(prompt_list, state)
+            if is_cuda:
+                torch.cuda.synchronize(self.device)
+            if len(raw_results) != len(prompt_list):
+                raise ValueError(
+                    f"SAM3 returned {len(raw_results)} prompt results for "
+                    f"{len(prompt_list)} prompts"
+                )
+
+            peak_allocated = (
+                torch.cuda.max_memory_allocated(self.device) / (1024**2)
+                if is_cuda else None
+            )
+            peak_reserved = (
+                torch.cuda.max_memory_reserved(self.device) / (1024**2)
+                if is_cuda else None
+            )
+            elapsed = time.perf_counter() - started
+            results: list[dict] = []
+            for raw in raw_results:
+                raw_target_boxes = [list(map(float, box)) for box in raw.get("boxes", [])]
+                raw_target_scores = [float(score) for score in raw.get("scores", [])]
+                if box_cleanup:
+                    target_boxes, target_scores, redundant_removed = suppress_redundant_boxes(
+                        raw_target_boxes,
+                        raw_target_scores,
+                        duplicate_iou=box_duplicate_iou,
+                        min_children=box_min_children,
+                        min_enclosing_area_ratio=box_min_area_ratio,
+                    )
+                else:
+                    target_boxes, target_scores, redundant_removed = (
+                        raw_target_boxes,
+                        raw_target_scores,
+                        [],
+                    )
+                results.append({
+                    "count": len(target_boxes),
+                    "boxes": target_boxes,
+                    "scores": target_scores,
+                    "inference_time_seconds": elapsed,
+                    "peak_vram_mb": peak_allocated,
+                    "peak_reserved_vram_mb": peak_reserved,
+                    **({
+                        "raw_count": len(raw_target_boxes),
+                        "raw_boxes": raw_target_boxes,
+                        "raw_scores": raw_target_scores,
+                        "deduplicated_count": len(target_boxes),
+                        "redundant_box_count": len(redundant_removed),
+                    } if box_cleanup else {}),
+                })
+            return results
+        except Exception:
+            if is_cuda:
+                torch.cuda.synchronize(self.device)
+            # A batch failure must not lose detections.  Replay the exact
+            # single-prompt implementation for the whole prompt chunk.
+            return [
+                self.infer(
+                    image_path,
+                    prompt,
+                    box_cleanup=box_cleanup,
+                    box_duplicate_iou=box_duplicate_iou,
+                    box_min_children=box_min_children,
+                    box_min_area_ratio=box_min_area_ratio,
+                )
+                for prompt in prompt_list
+            ]
+        finally:
+            if state is not None:
+                try:
+                    self.processor.reset_all_prompts(state)
+                except Exception:
+                    pass
+
 
 def build_counter(
     *,
@@ -503,6 +655,7 @@ def build_counter(
     device: str | None = None,
     threshold: float = 0.5,
     amp: bool = True,
+    compile_model: bool = False,
 ) -> Sam3VerboseCounter:
     """Build a persistent SAM3 counter, resolved for the current environment.
 
@@ -511,6 +664,8 @@ def build_counter(
         device: Torch device string. Defaults to ``cuda`` when available, else ``cpu``.
         threshold: Detection confidence threshold in ``[0, 1]``.
         amp: Enable CUDA automatic mixed precision (ignored on CPU).
+        compile_model: Opt in to the native vision-backbone compiler.  A
+            compiler failure falls back to the uncompiled model.
 
     Raises:
         FileNotFoundError: If the checkpoint does not exist.
@@ -531,6 +686,7 @@ def build_counter(
         device=device,
         threshold=threshold,
         amp=amp,
+        compile_model=compile_model,
     )
 
 

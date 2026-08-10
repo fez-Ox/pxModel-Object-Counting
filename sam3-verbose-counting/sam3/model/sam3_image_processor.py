@@ -134,6 +134,65 @@ class Sam3Processor:
         return self._forward_grounding(state)
 
     @torch.inference_mode()
+    def set_text_prompts(self, prompts: List[str], state: Dict) -> list[dict]:
+        """Run independent text prompts together over one cached image.
+
+        Prompts remain separate entries in the language batch.  This is not
+        equivalent to joining prompt strings, and every result is filtered by
+        the processor's unchanged confidence threshold independently.
+        """
+        if "backbone_out" not in state:
+            raise ValueError("You must call set_image before set_text_prompts")
+        if not prompts:
+            return []
+
+        text_outputs = self.model.backbone.forward_text(list(prompts), device=self.device)
+        state["backbone_out"].update(text_outputs)
+        batch_size = len(prompts)
+        geometric_prompt = self.model._get_dummy_prompt(batch_size)
+        find_stage = FindStage(
+            img_ids=torch.zeros(batch_size, device=self.device, dtype=torch.long),
+            text_ids=torch.arange(batch_size, device=self.device, dtype=torch.long),
+            input_boxes=None,
+            input_boxes_mask=None,
+            input_boxes_label=None,
+            input_points=None,
+            input_points_mask=None,
+        )
+        outputs = self.model.forward_grounding(
+            backbone_out=state["backbone_out"],
+            find_input=find_stage,
+            geometric_prompt=geometric_prompt,
+            find_target=None,
+        )
+
+        out_bbox = outputs["pred_boxes"]
+        out_logits = outputs["pred_logits"]
+        out_probs = out_logits.sigmoid()
+        presence_score = outputs["presence_logit_dec"].sigmoid().unsqueeze(1)
+        out_probs = (out_probs * presence_score).squeeze(-1)
+        if out_bbox.ndim == 2:
+            out_bbox = out_bbox.unsqueeze(0)
+        if out_probs.ndim == 1:
+            out_probs = out_probs.unsqueeze(0)
+
+        scale_fct = torch.tensor(
+            [state["original_width"], state["original_height"],
+             state["original_width"], state["original_height"]],
+            device=self.device,
+            dtype=out_bbox.dtype,
+        )
+        boxes = box_ops.box_cxcywh_to_xyxy(out_bbox) * scale_fct[None, None, :]
+        results: list[dict] = []
+        for index in range(batch_size):
+            keep = out_probs[index] > self.confidence_threshold
+            results.append({
+                "boxes": boxes[index][keep].detach().cpu().tolist(),
+                "scores": out_probs[index][keep].detach().cpu().tolist(),
+            })
+        return results
+
+    @torch.inference_mode()
     def add_geometric_prompt(self, box: List, label: bool, state: Dict):
         """Adds a box prompt and run the inference.
         The image needs to be set, but not necessarily the text prompt.

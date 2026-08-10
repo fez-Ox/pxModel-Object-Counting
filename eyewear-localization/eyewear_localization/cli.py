@@ -75,6 +75,9 @@ def set_overrides_from_args(args: argparse.Namespace) -> dict[str, Any]:
         ("scene.person_threshold", "person_threshold"),
         ("scene.poster_threshold", "poster_threshold"),
         ("scene.shelf_threshold", "shelf_threshold"),
+        ("performance.c1_batch_size", "c1_batch_size"),
+        ("performance.sam3_prompt_batch_size", "sam3_prompt_batch_size"),
+        ("performance.sam3_compile", "sam3_compile"),
     ):
         value = getattr(args, attr, None)
         if value is not None:
@@ -121,12 +124,24 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--c1-margin", type=float, default=None, help="C1 crop margin fraction (default 0.25)")
     parser.add_argument("--c1-scales", default=None, help="C1 multi-scale OCR factors, comma-separated (default '1.0,2.0,4.0')")
+    parser.add_argument(
+        "--c1-batch-size", type=int, default=None,
+        help="Opt-in C1 OCR micro-batch size; 1 keeps the reference sequential path",
+    )
     parser.add_argument("--c1-no-sharpen", action="store_true", help="Disable post-upscale sharpening in C1")
     parser.add_argument("--c1-no-clahe", action="store_true", help="Disable adaptive CLAHE contrast boost in C1")
     parser.add_argument("--c1-no-dual-polarity", action="store_true", help="Disable dual light/dark polarity pass in C1")
     parser.add_argument("--sam3-checkpoint", help="Optional native SAM3 checkpoint")
     parser.add_argument("--device", default=None, help="SAM3 device, when enabled")
     parser.add_argument("--sam3-threshold", type=float, default=0.25)
+    parser.add_argument(
+        "--sam3-prompt-batch-size", type=int, default=None,
+        help="Opt-in batch size for separate SAM3 prompts; 1 keeps sequential prompts",
+    )
+    parser.add_argument(
+        "--sam3-compile", action="store_true", default=None,
+        help="Opt in to SAM3 vision-backbone compilation; falls back if unavailable",
+    )
     parser.add_argument(
         "--shelf-filter",
         action=argparse.BooleanOptionalAction,
@@ -187,8 +202,24 @@ def main(argv: list[str] | None = None) -> int:
         )
     config.gazetteer = sorted({normalize_text(brand) for brand in brands if normalize_text(brand)})
 
-    # Scene thresholds from overrides (or config.yaml defaults)
+    # Scene thresholds and execution knobs from overrides/config defaults.
     scene = overrides.get("scene", {})
+    performance = overrides.get("performance", {})
+    c1_batch_size = (
+        args.c1_batch_size
+        if args.c1_batch_size is not None
+        else int(performance.get("c1_batch_size", config.c1_batch_size))
+    )
+    sam3_prompt_batch_size = (
+        args.sam3_prompt_batch_size
+        if args.sam3_prompt_batch_size is not None
+        else int(performance.get("sam3_prompt_batch_size", config.sam3_prompt_batch_size))
+    )
+    sam3_compile = (
+        args.sam3_compile
+        if args.sam3_compile is not None
+        else bool(performance.get("sam3_compile", config.sam3_compile))
+    )
     gazetteer = Gazetteer(config.gazetteer)
     ocr = build_ocr_backend(
         args.ocr_backend,
@@ -202,6 +233,8 @@ def main(argv: list[str] | None = None) -> int:
             args.sam3_checkpoint,
             device=args.device,
             threshold=args.sam3_threshold,
+            prompt_batch_size=sam3_prompt_batch_size,
+            compile_model=sam3_compile,
         )
     else:
         localizer = HeuristicLocalizer("no SAM3 checkpoint supplied")
@@ -223,6 +256,7 @@ def main(argv: list[str] | None = None) -> int:
     # Build C1 with optional tuning parameters.
     c1_kwargs: dict[str, Any] = {
         "verbose": bool(getattr(localizer, "verbose", False)),
+        "batch_size": c1_batch_size,
     }
     if args.c1_margin is not None:
         c1_kwargs["margin"] = args.c1_margin

@@ -86,6 +86,7 @@ class OnProductBrandingCue:
         use_clahe: bool = False,
         dual_polarity: bool = False,
         verbose: bool = False,
+        batch_size: int = 1,
     ) -> None:
         self.ocr = ocr
         self.gazetteer = gazetteer
@@ -95,6 +96,9 @@ class OnProductBrandingCue:
         self.use_clahe = use_clahe
         self.dual_polarity = dual_polarity
         self.verbose = verbose
+        # Batching is deliberately opt-in.  Backends without a batch API, and
+        # any failed batch call, use the reference single-image path.
+        self.batch_size = max(1, int(batch_size))
 
     @staticmethod
     def _load(image_path: str | Path):
@@ -124,14 +128,8 @@ class OnProductBrandingCue:
 
         return ImageOps.invert(image.convert("RGB"))
 
-    def _ocr_at_scale(
-        self,
-        crop: Any,
-        scale: float,
-        *,
-        method: str | None = None,
-    ) -> list[TextDetection]:
-        """Upscale with Lanczos, optionally sharpen, enhance contrast/polarity, and run OCR."""
+    def _scaled_variants(self, crop: Any, scale: float) -> list[Any]:
+        """Create the exact ordered pixel variants used by the reference path."""
         from PIL import Image
 
         crop_width, crop_height = crop.size
@@ -150,39 +148,121 @@ class OnProductBrandingCue:
         if self.use_clahe:
             variants.append(self._enhance_contrast(working))
         if self.dual_polarity:
-            variants.append(self._invert_polarity(working))
+            inverted = self._invert_polarity(working)
+            variants.append(inverted)
             if self.use_clahe:
-                variants.append(self._enhance_contrast(self._invert_polarity(working)))
+                variants.append(self._enhance_contrast(inverted))
+        return variants
 
-        detections: list[TextDetection] = []
+    def _single_detector(self, method: str | None) -> Callable[[Any], Any] | None:
         detector = getattr(self.ocr, method, None) if method else None
         if not callable(detector):
             detector = getattr(self.ocr, "detect_preprocessed", None)
+        return detector if callable(detector) else None
 
-        for variant in variants:
+    def _batch_detections(
+        self,
+        images: list[Any],
+        *,
+        method: str | None,
+    ) -> list[list[TextDetection]]:
+        """Run a backend batch, falling back per item on any incompatibility.
+
+        The fallback is intentionally local to a chunk.  A malformed result,
+        unsupported processor, or GPU OOM therefore cannot turn valid OCR into
+        an empty result.
+        """
+        detector = self._single_detector(method)
+        if not images:
+            return []
+
+        batch_name = f"{method}_batch" if method else "detect_preprocessed_batch"
+        batch_detector = getattr(self.ocr, batch_name, None)
+        if self.batch_size <= 1 or len(images) == 1 or not callable(batch_detector):
+            return [
+                list(detector(image)) if detector is not None else []
+                for image in images
+            ]
+
+        results: list[list[TextDetection]] = []
+        for start in range(0, len(images), self.batch_size):
+            chunk = images[start : start + self.batch_size]
             try:
-                if callable(detector):
-                    variant_detections = list(detector(variant))
-                else:
-                    variant_detections = list(self.ocr.detect(variant))
-                detections.extend(variant_detections)
-                # If a variant produces a direct gazetteer match, stop early to save inference calls
-                if any(self.gazetteer.match(det.text) is not None for det in variant_detections):
-                    break
+                raw = list(batch_detector(chunk))
+                if len(raw) != len(chunk):
+                    raise ValueError(
+                        f"{batch_name} returned {len(raw)} results for {len(chunk)} inputs"
+                    )
+                results.extend([list(item) for item in raw])
             except Exception:
-                continue
+                # Preserve correctness over throughput for this chunk.
+                results.extend(
+                    [list(detector(image)) if detector is not None else [] for image in chunk]
+                )
+        return results
 
-        # Rescale detection bboxes back to crop coordinates.
-        rescaled: list[TextDetection] = []
-        for detection in detections:
-            local_x, local_y, local_w, local_h = detection.bbox
-            rescaled.append(TextDetection(
-                text=detection.text,
-                bbox=[local_x / scale, local_y / scale, local_w / scale, local_h / scale],
-                confidence=detection.confidence,
-                source=detection.source,
-            ))
+    def _ocr_at_scale_batch(
+        self,
+        crops: list[Any],
+        scale: float,
+        *,
+        method: str | None = None,
+    ) -> list[list[TextDetection]]:
+        """OCR several crops while retaining per-crop variant early exits."""
+        variants_by_crop = [self._scaled_variants(crop, scale) for crop in crops]
+        output: list[list[TextDetection]] = [[] for _ in crops]
+        active = list(range(len(crops)))
+        variant_count = max((len(variants) for variants in variants_by_crop), default=0)
+
+        for variant_index in range(variant_count):
+            current = [
+                index for index in active if variant_index < len(variants_by_crop[index])
+            ]
+            if not current:
+                continue
+            detections_by_crop = self._batch_detections(
+                [variants_by_crop[index][variant_index] for index in current],
+                method=method,
+            )
+            next_active: list[int] = []
+            for index, detections in zip(current, detections_by_crop):
+                output[index].extend(detections)
+                # This is deliberately the same direct-match early exit as
+                # _ocr_at_scale; confidence is evaluated later by emit().
+                if not any(self.gazetteer.match(det.text) is not None for det in detections):
+                    next_active.append(index)
+            active = next_active
+            if not active:
+                break
+
+        # Map boxes from the upscaled working image back to crop coordinates.
+        rescaled: list[list[TextDetection]] = []
+        for detections in output:
+            rescaled.append([
+                TextDetection(
+                    text=detection.text,
+                    bbox=[
+                        detection.bbox[0] / scale,
+                        detection.bbox[1] / scale,
+                        detection.bbox[2] / scale,
+                        detection.bbox[3] / scale,
+                    ],
+                    confidence=detection.confidence,
+                    source=detection.source,
+                )
+                for detection in detections
+            ])
         return rescaled
+
+    def _ocr_at_scale(
+        self,
+        crop: Any,
+        scale: float,
+        *,
+        method: str | None = None,
+    ) -> list[TextDetection]:
+        """Reference single-crop API backed by the batch scheduler."""
+        return self._ocr_at_scale_batch([crop], scale, method=method)[0]
 
     def _ocr_paragraph_pass(self, crop: Any, scale: float) -> list[TextDetection]:
         """Run OCR with paragraph=True to merge fragmented text segments."""
@@ -229,6 +309,11 @@ class OnProductBrandingCue:
         evidence: list[Evidence] = []
         if self.verbose:
             print(f"[C1] start instances={len(instances)}", flush=True)
+
+        # Crop geometry and pixels are prepared once.  The scheduler below
+        # batches only independent OCR work; it never removes an instance or
+        # changes the crop, scale, variant, threshold, or fallback budget.
+        crops: list[tuple[Instance, float, float, Any]] = []
         for instance in instances:
             x, y, box_width, box_height = instance.bbox
             margin_x = box_width * self.margin
@@ -237,63 +322,109 @@ class OnProductBrandingCue:
             top = max(0.0, y - margin_y)
             right = min(float(width), x + box_width + margin_x)
             bottom = min(float(height), y + box_height + margin_y)
-            crop = image.crop((round(left), round(top), round(right), round(bottom)))
+            crops.append((
+                instance,
+                left,
+                top,
+                image.crop((round(left), round(top), round(right), round(bottom))),
+            ))
 
-            # Collect detections across all configured scales and paragraph pass.
-            # A selective OCR cascade runs its cheap member at every scale;
-            # only an unmatched crop reaches the stronger backend once.
-            all_detections: list[tuple[TextDetection, float]] = []
-            primary_method = (
-                "detect_primary_preprocessed"
-                if callable(getattr(self.ocr, "detect_primary_preprocessed", None))
-                else None
+        all_detections: list[list[tuple[TextDetection, float]]] = [
+            [] for _ in crops
+        ]
+        primary_method = (
+            "detect_primary_preprocessed"
+            if callable(getattr(self.ocr, "detect_primary_preprocessed", None))
+            else None
+        )
+
+        # Evaluate one scale for all currently eligible crops.  A crop leaves
+        # the active set at exactly the same confidence condition as before.
+        active = list(range(len(crops)))
+        for scale in self.scales:
+            if not active:
+                break
+            scale_results = self._ocr_at_scale_batch(
+                [crops[index][3] for index in active],
+                scale,
+                method=primary_method,
             )
-            for scale in self.scales:
-                scale_detections = self._ocr_at_scale(crop, scale, method=primary_method)
-                for detection in scale_detections:
-                    all_detections.append((detection, scale))
-                if any(
+            next_active: list[int] = []
+            for index, detections in zip(active, scale_results):
+                all_detections[index].extend((detection, scale) for detection in detections)
+                if not any(
                     (match := self.gazetteer.match(det.text)) is not None
                     and det.confidence * match.score >= 0.50
-                    for det in scale_detections
+                    for det in detections
                 ):
-                    break
-            # Paragraph pass at the largest scale to catch merged fragments.
-            if self.scales:
-                best_scale = max(self.scales)
+                    next_active.append(index)
+            active = next_active
+
+        # Paragraph mode is intentionally left as a per-crop operation; it is
+        # an EasyOCR-specific compatibility path and does not invoke the VLM.
+        if self.scales:
+            best_scale = max(self.scales)
+            for index, (_instance, _left, _top, crop) in enumerate(crops):
                 for detection in self._ocr_paragraph_pass(crop, best_scale):
-                    all_detections.append((detection, best_scale))
-                fallback_method = getattr(self.ocr, "detect_fallback_preprocessed", None)
-                has_reliable_primary_match = any(
-                    (match := self.gazetteer.match(detection.text)) is not None
-                    and detection.confidence * match.score >= 0.55
-                    for detection, _scale in all_detections
-                )
-                if callable(fallback_method) and not has_reliable_primary_match:
-                    for detection in self._ocr_at_scale(
-                        crop,
+                    all_detections[index].append((detection, best_scale))
+
+            fallback_method = getattr(self.ocr, "detect_fallback_preprocessed", None)
+            if callable(fallback_method):
+                fallback_indices: list[int] = []
+                for index, detections_with_scale in enumerate(all_detections):
+                    has_reliable_primary_match = any(
+                        (match := self.gazetteer.match(detection.text)) is not None
+                        and detection.confidence * match.score >= 0.55
+                        for detection, _scale in detections_with_scale
+                    )
+                    if not has_reliable_primary_match:
+                        fallback_indices.append(index)
+
+                # SelectiveOCRBackend exposes the exact remaining budget.  The
+                # slice preserves the reference instance-order reservation.
+                remaining = getattr(self.ocr, "remaining_fallback_calls", None)
+                if isinstance(remaining, int):
+                    fallback_indices = fallback_indices[:max(0, remaining)]
+                if getattr(self.ocr, "fallback_batch_order_sensitive", False):
+                    # The selective cascade owns a shared mutable budget. Its
+                    # single-image fallback path may consume more than one
+                    # variant call for a crop, so replay it in reference order.
+                    for index in fallback_indices:
+                        detections = self._ocr_at_scale(
+                            crops[index][3],
+                            best_scale,
+                            method="detect_fallback_preprocessed",
+                        )
+                        all_detections[index].extend(
+                            (detection, best_scale) for detection in detections
+                        )
+                else:
+                    fallback_results = self._ocr_at_scale_batch(
+                        [crops[index][3] for index in fallback_indices],
                         best_scale,
                         method="detect_fallback_preprocessed",
-                    ):
-                        all_detections.append((detection, best_scale))
+                    )
+                    for index, detections in zip(fallback_indices, fallback_results):
+                        all_detections[index].extend(
+                            (detection, best_scale) for detection in detections
+                        )
 
+        for index, (instance, left, top, _crop) in enumerate(crops):
             # For each brand, keep only the highest-confidence match across
             # all scales and modes. This avoids duplicate evidence while
             # allowing different scales to succeed on different text.
             best_per_brand: dict[str, tuple[Evidence, float]] = {}
-            for detection, scale in all_detections:
+            for detection, scale in all_detections[index]:
                 match = self.gazetteer.match(detection.text)
                 if match is None:
                     continue
                 local_x, local_y, local_w, local_h = detection.bbox
-                global_box = [
-                    left + local_x,
-                    top + local_y,
-                    local_w,
-                    local_h,
-                ]
+                global_box = [left + local_x, top + local_y, local_w, local_h]
                 spatial_weight = self._spatial_proximity_weight(global_box, instance.bbox)
-                combined_confidence = max(0.0, min(1.0, detection.confidence * match.score * spatial_weight))
+                combined_confidence = max(
+                    0.0,
+                    min(1.0, detection.confidence * match.score * spatial_weight),
+                )
                 ev = Evidence(
                     instance_id=instance.id,
                     brand=match.brand,
@@ -312,13 +443,14 @@ class OnProductBrandingCue:
                 existing = best_per_brand.get(match.brand)
                 if existing is None or combined_confidence > existing[1]:
                     best_per_brand[match.brand] = (ev, combined_confidence)
-            instance_evidence = [ev for ev, _ in sorted(best_per_brand.values(), key=lambda item: item[1], reverse=True)]
+            instance_evidence = [
+                ev for ev, _ in sorted(
+                    best_per_brand.values(), key=lambda item: item[1], reverse=True
+                )
+            ]
             evidence.extend(instance_evidence)
             if self.verbose:
-                print(
-                    f"[C1] {instance.id} evidence={len(instance_evidence)}",
-                    flush=True,
-                )
+                print(f"[C1] {instance.id} evidence={len(instance_evidence)}", flush=True)
         return evidence
 
     @staticmethod

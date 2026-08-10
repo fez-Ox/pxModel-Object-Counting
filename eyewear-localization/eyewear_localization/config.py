@@ -31,11 +31,21 @@ class LocalizationConfig:
     c1_use_clahe: bool = True
     c1_dual_polarity: bool = True
     florence2_model_id: str = "microsoft/Florence-2-large"
+    # Safe defaults retain the reference sequential execution.  Batch sizes
+    # are explicit deployment knobs and are enabled only after parity checks.
+    c1_batch_size: int = 1
+    sam3_prompt_batch_size: int = 1
+    sam3_compile: bool = False
 
     def __post_init__(self) -> None:
         self.gazetteer = sorted(
             {normalize_text(str(item)) for item in self.gazetteer if normalize_text(str(item))}
         )
+        self.c1_batch_size = _positive_int(self.c1_batch_size, "c1_batch_size")
+        self.sam3_prompt_batch_size = _positive_int(
+            self.sam3_prompt_batch_size, "sam3_prompt_batch_size"
+        )
+        self.sam3_compile = bool(self.sam3_compile)
         for name, value in self.cue_reliability.items():
             self.cue_reliability[name] = _probability(value, name=f"cue_reliability.{name}")
         if self.temperature <= 0:
@@ -74,6 +84,11 @@ class LocalizationConfig:
             "cascade": {
                 "use_vlm_audit": self.use_vlm_audit,
                 "uncertainty_band": list(self.uncertainty_band),
+            },
+            "performance": {
+                "c1_batch_size": self.c1_batch_size,
+                "sam3_prompt_batch_size": self.sam3_prompt_batch_size,
+                "sam3_compile": self.sam3_compile,
             },
         }
 
@@ -114,6 +129,13 @@ def _nonnegative(value: Any, name: str) -> float:
     return result
 
 
+def _positive_int(value: Any, name: str) -> int:
+    result = int(value)
+    if result < 1:
+        raise ValueError(f"{name} must be at least 1")
+    return result
+
+
 def _mapping(value: Any, name: str) -> Mapping[str, Any]:
     if value is None:
         return {}
@@ -126,6 +148,7 @@ def config_from_mapping(raw: Mapping[str, Any]) -> LocalizationConfig:
     fusion = _mapping(raw.get("fusion"), "fusion")
     smoothing = _mapping(raw.get("smoothing"), "smoothing")
     cascade = _mapping(raw.get("cascade"), "cascade")
+    performance = _mapping(raw.get("performance"), "performance")
     band = cascade.get("uncertainty_band", (0.45, 0.70))
     return LocalizationConfig(
         gazetteer=list(raw.get("gazetteer", [])),
@@ -144,6 +167,12 @@ def config_from_mapping(raw: Mapping[str, Any]) -> LocalizationConfig:
         smoothing_gate_punknown=float(smoothing.get("gate_punknown", 0.5)),
         use_vlm_audit=bool(cascade.get("use_vlm_audit", True)),
         uncertainty_band=(float(band[0]), float(band[1])),
+        c1_batch_size=_positive_int(performance.get("c1_batch_size", 1), "performance.c1_batch_size"),
+        sam3_prompt_batch_size=_positive_int(
+            performance.get("sam3_prompt_batch_size", 1),
+            "performance.sam3_prompt_batch_size",
+        ),
+        sam3_compile=bool(performance.get("sam3_compile", False)),
     )
 
 

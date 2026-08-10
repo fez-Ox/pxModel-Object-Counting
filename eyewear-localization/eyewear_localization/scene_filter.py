@@ -101,14 +101,13 @@ class SAM3SceneFilter:
             "person": [], "poster": [], "shelf": []
         }
         for kind, candidates in prompts.items():
-            for prompt in candidates:
-                detections[kind].extend(
-                    self.localizer.detect_prompt(
-                        image_path,
-                        prompt,
-                        threshold=thresholds[kind],
-                    )
-                )
+            per_prompt = self.localizer.detect_prompts(
+                image_path,
+                candidates,
+                thresholds=[thresholds[kind]] * len(candidates),
+            )
+            for prompt_detections in per_prompt:
+                detections[kind].extend(prompt_detections)
             # Cross-prompt duplicates are harmless for filtering but reducing
             # them keeps the audit support compact.
             unique: list[LocalizationDetection] = []

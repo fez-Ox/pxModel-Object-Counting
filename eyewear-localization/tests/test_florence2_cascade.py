@@ -2,6 +2,7 @@ from pathlib import Path
 import tempfile
 import unittest
 
+import torch
 from PIL import Image
 
 from eyewear_localization.config import LocalizationConfig
@@ -50,6 +51,68 @@ class C1CascadeStub:
         return [TextDetection("Cartier", [1, 1, 10, 5], 0.9, source=self.name)]
 
 
+class DeterministicBatchOCR:
+    name = "deterministic-batch-ocr"
+    reliability = 1.0
+
+    def __init__(self):
+        self.single_calls = 0
+        self.batch_calls = 0
+
+    @staticmethod
+    def _result():
+        return [TextDetection("Cartier", [1, 1, 10, 5], 0.9, source="deterministic")]
+
+    def detect_preprocessed(self, image):
+        self.single_calls += 1
+        return self._result()
+
+    def detect_preprocessed_batch(self, images):
+        self.batch_calls += 1
+        return [self._result() for _ in images]
+
+
+class FakeFlorenceInputs(dict):
+    def to(self, device):
+        return self
+
+
+class FakeFlorenceProcessor:
+    def __init__(self):
+        self.batch_sizes = []
+
+    def __call__(self, *, text, images, return_tensors, padding=False):
+        batch_size = len(images) if isinstance(images, list) else 1
+        self.batch_sizes.append(batch_size)
+        return FakeFlorenceInputs(
+            input_ids=torch.zeros((batch_size, 1), dtype=torch.long),
+            pixel_values=torch.zeros((batch_size, 3, 4, 4), dtype=torch.float32),
+        )
+
+    def batch_decode(self, generated_ids, skip_special_tokens=False):
+        return [f"response-{index}" for index in range(generated_ids.shape[0])]
+
+    def post_process_generation(self, generated_text, *, task, image_size):
+        index = int(generated_text.rsplit("-", 1)[1])
+        return {
+            task: {
+                "labels": ["Cartier" if index == 0 else "Gucci"],
+                "bboxes": [[0, 0, 20, 10]],
+            }
+        }
+
+
+class FakeFlorenceModel:
+    def __init__(self):
+        self._parameter = torch.nn.Parameter(torch.zeros(1))
+
+    def parameters(self):
+        yield self._parameter
+
+    def generate(self, *, input_ids, pixel_values, max_new_tokens, num_beams, do_sample):
+        return torch.zeros((input_ids.shape[0], 1), dtype=torch.long)
+
+
 class Florence2AndCascadeTests(unittest.TestCase):
     def setUp(self):
         self.config = LocalizationConfig(gazetteer=["cartier", "gucci", "ray-ban"], use_vlm_audit=False)
@@ -58,6 +121,21 @@ class Florence2AndCascadeTests(unittest.TestCase):
     def test_build_florence2_ocr_backend(self):
         backend = build_ocr_backend("florence2")
         self.assertEqual(backend.name, "florence2")
+
+    def test_florence_batch_parser_keeps_one_result_per_input(self):
+        backend = Florence2OCRBackend(device="cpu")
+        processor = FakeFlorenceProcessor()
+        backend._processor = processor
+        backend._model = FakeFlorenceModel()
+        backend.actual_device = "cpu"
+        output = backend.detect_preprocessed_batch([
+            Image.new("RGB", (40, 20), "white"),
+            Image.new("RGB", (40, 20), "white"),
+        ])
+
+        self.assertEqual(processor.batch_sizes, [2])
+        self.assertEqual([[item.text for item in detections] for detections in output], [["Cartier"], ["Gucci"]])
+        self.assertEqual(output[0][0].bbox, [0.0, 0.0, 20.0, 10.0])
 
     def test_selective_ocr_calls_stronger_backend_only_when_primary_is_unmatched(self):
         primary = StubOCR([TextDetection("unrelated", [1, 1, 10, 5], 0.9, source="primary")])
@@ -94,6 +172,71 @@ class Florence2AndCascadeTests(unittest.TestCase):
         self.assertEqual(ocr.fallback_calls, 1)
         self.assertEqual(len(evidence), 1)
         self.assertEqual(evidence[0].brand, "cartier")
+
+    def test_selective_fallback_keeps_order_sensitive_budget_sequential(self):
+        primary = StubOCR([TextDetection("unrelated", [1, 1, 10, 5], 0.9, source="primary")])
+        fallback = StubOCR([TextDetection("unrelated", [1, 1, 10, 5], 0.9, source="fallback")])
+        ocr = SelectiveOCRBackend(
+            primary,
+            fallback,
+            Gazetteer(["cartier"]),
+            max_fallback_calls=2,
+        )
+        cue = OnProductBrandingCue(
+            ocr,
+            Gazetteer(["cartier"]),
+            margin=0.0,
+            scales=(1.0,),
+            sharpen=False,
+            use_clahe=True,
+            dual_polarity=True,
+            batch_size=2,
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            image_path = Path(directory) / "image.png"
+            Image.new("RGB", (100, 100), "white").save(image_path)
+            cue.emit(
+                image_path,
+                [
+                    Instance("inst_0001", [10, 10, 30, 20]),
+                    Instance("inst_0002", [50, 10, 30, 20]),
+                ],
+            )
+
+        # The first unmatched crop owns both available variant calls, exactly
+        # as in the reference loop; the later crop cannot steal a slot.
+        self.assertEqual(fallback.calls, 2)
+
+    def test_c1_batch_scheduler_matches_reference_evidence(self):
+        instances = [
+            Instance("inst_0001", [10, 10, 30, 20]),
+            Instance("inst_0002", [50, 10, 30, 20]),
+        ]
+        with tempfile.TemporaryDirectory() as directory:
+            image_path = Path(directory) / "image.png"
+            Image.new("RGB", (100, 100), "white").save(image_path)
+            sequential_ocr = DeterministicBatchOCR()
+            batched_ocr = DeterministicBatchOCR()
+            sequential = OnProductBrandingCue(
+                sequential_ocr,
+                Gazetteer(["cartier"]),
+                margin=0.0,
+                scales=(1.0, 2.0),
+                sharpen=False,
+                batch_size=1,
+            ).emit(image_path, instances)
+            batched = OnProductBrandingCue(
+                batched_ocr,
+                Gazetteer(["cartier"]),
+                margin=0.0,
+                scales=(1.0, 2.0),
+                sharpen=False,
+                batch_size=2,
+            ).emit(image_path, instances)
+
+        self.assertEqual([item.to_dict() for item in batched], [item.to_dict() for item in sequential])
+        self.assertEqual(batched_ocr.batch_calls, 1)
+        self.assertEqual(batched_ocr.single_calls, 0)
 
     def test_selective_ocr_runs_scene_fallback_even_when_primary_finds_one_brand(self):
         primary = StubOCR([TextDetection("Cartier", [1, 1, 10, 5], 0.9, source="primary")])

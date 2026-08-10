@@ -81,6 +81,19 @@ class OverrideTests(unittest.TestCase):
         self.assertEqual(overrides["fusion"]["margin"], 0.2)
         self.assertEqual(overrides["cue_reliability"]["C1"], 0.7)
 
+    def test_performance_overrides_round_trip(self):
+        new = self.config.with_overrides({
+            "performance": {
+                "c1_batch_size": 4,
+                "sam3_prompt_batch_size": 3,
+                "sam3_compile": True,
+            }
+        })
+        self.assertEqual(new.c1_batch_size, 4)
+        self.assertEqual(new.sam3_prompt_batch_size, 3)
+        self.assertTrue(new.sam3_compile)
+        self.assertEqual(new.to_dict()["performance"]["c1_batch_size"], 4)
+
     def test_full_round_trip_overrides_to_config(self):
         new = self.config.with_overrides({
             "fusion": {"tau": 0.35, "margin": 0.1},

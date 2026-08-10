@@ -68,8 +68,25 @@ It runs Tesseract first, then performs one Florence-2 scene pass so a match for
 one bay cannot hide a missed sibling brand. Remaining budget is available for
 unmatched C1 crops; C1 runs Tesseract at all configured scales before spending
 at most one Florence-2 call on an unmatched instance. Florence output remains
-OCR evidence and is still closed-set gazetteer-gated. For a sequential Kaggle
-workflow, save the OCR JSON first and reuse it while SAM3 runs:
+OCR evidence and is still closed-set gazetteer-gated.
+
+The lossless performance controls are opt-in and default to the reference-safe
+sequential path. After the parity protocol in
+`../eyewear_lossless_performance_strategy.md` passes on the target GPU, try:
+
+```bash
+uv run python infer.py image.jpg --sam3-checkpoint ../sam3-verbose-counting/checkpoints/sam3.pt \
+  --ocr-backend florence2 --c1-batch-size 2 --sam3-prompt-batch-size 2
+```
+
+C1 batches independent Florence crop calls; SAM3 batches separate prompt
+entries, never comma-joined prompts. Any malformed batch, OOM, or unsupported
+backend replays the sequential call. `--sam3-compile` additionally opts into
+the native SAM3 vision compiler and falls back to the uncompiled model if
+compilation is unavailable.
+
+For a sequential Kaggle workflow, save the OCR JSON first and reuse it while
+SAM3 runs:
 
 ```bash
 uv run python infer.py image.jpg --ocr-backend tesseract+florence2 \

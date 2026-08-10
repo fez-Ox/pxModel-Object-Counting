@@ -38,3 +38,10 @@ smoothing:
 cascade:
   use_vlm_audit: true
   uncertainty_band: [0.45, 0.70]
+
+# Keep the reference path by default. Increase these only after the parity
+# protocol in eyewear_lossless_performance_strategy.md passes on the target GPU.
+performance:
+  c1_batch_size: 1
+  sam3_prompt_batch_size: 1
+  sam3_compile: false

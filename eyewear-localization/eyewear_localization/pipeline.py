@@ -32,7 +32,11 @@ class LocalizationPipeline:
     ) -> None:
         self.frontend = frontend
         self.config = config or LocalizationConfig(gazetteer=list(frontend.gazetteer.brands))
-        self.c1 = c1 or OnProductBrandingCue(frontend.ocr, frontend.gazetteer)
+        self.c1 = c1 or OnProductBrandingCue(
+            frontend.ocr,
+            frontend.gazetteer,
+            batch_size=self.config.c1_batch_size,
+        )
         self.c2 = c2 or SignageScopeCue()
         self.c4 = c4 or StylePriorCue()
         self.auditor = auditor or NullAuditor()

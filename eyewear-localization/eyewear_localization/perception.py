@@ -923,49 +923,20 @@ class Florence2OCRBackend:
             return values[0], values[1], values[2], values[3]
         raise ValueError("Florence OCR box has fewer than four coordinates")
 
-    def _detect_model(self, source: Any, *, scale: float) -> list[TextDetection]:
-        import torch
-
-        working = source
-        if scale != 1.0:
-            working = source.resize(
-                (max(1, round(source.width * scale)),
-                 max(1, round(source.height * scale)))
-            )
-        width, height = working.size
-
-        # OCR_WITH_REGION is the Florence-2 task that returns both text and
-        # boxes.  Plain <OCR> returns a string on some model revisions and a
-        # region dictionary on others, which previously made the parser
-        # silently produce no detections for the Kaggle run.
+    def _parse_model_output(
+        self,
+        generated_text: str,
+        *,
+        source: Any,
+        working_size: tuple[int, int],
+        scale: float,
+    ) -> list[TextDetection]:
+        """Parse one Florence response without changing the reference rules."""
         prompt = "<OCR_WITH_REGION>"
-        inputs = self._processor(text=prompt, images=working, return_tensors="pt").to(self.actual_device)
-        pixel_values = inputs["pixel_values"]
-        if torch.is_floating_point(pixel_values):
-            # Florence's processor emits float32 pixels even when the CUDA
-            # checkpoint is loaded in float16. Match the vision tower dtype;
-            # otherwise its first convolution rejects the input/bias pair.
-            vision_tower = getattr(self._model, "vision_tower", self._model)
-            try:
-                vision_dtype = next(vision_tower.parameters()).dtype
-            except StopIteration:
-                vision_dtype = pixel_values.dtype
-            pixel_values = pixel_values.to(dtype=vision_dtype)
-
-        with torch.no_grad():
-            generated_ids = self._model.generate(
-                input_ids=inputs["input_ids"],
-                pixel_values=pixel_values,
-                max_new_tokens=1024,
-                num_beams=3,
-                do_sample=False,
-            )
-
-        generated_text = self._processor.batch_decode(generated_ids, skip_special_tokens=False)[0]
         parsed_answer = self._processor.post_process_generation(
             generated_text,
             task=prompt,
-            image_size=(width, height),
+            image_size=working_size,
         )
         if not isinstance(parsed_answer, Mapping):
             parsed_answer = {}
@@ -1020,6 +991,93 @@ class Florence2OCRBackend:
                     except ValueError:
                         continue
         return output
+
+    def _model_inputs(self, working: Any, *, batch_size: int = 1):
+        """Build processor inputs for one or several identical OCR prompts."""
+        prompt = "<OCR_WITH_REGION>"
+        if batch_size == 1:
+            return self._processor(text=prompt, images=working, return_tensors="pt")
+        return self._processor(
+            text=[prompt] * batch_size,
+            images=working,
+            return_tensors="pt",
+            padding=True,
+        )
+
+    def _generate_model(self, inputs: Any) -> list[str]:
+        import torch
+
+        inputs = inputs.to(self.actual_device)
+        pixel_values = inputs["pixel_values"]
+        if torch.is_floating_point(pixel_values):
+            # Florence's processor emits float32 pixels even when the CUDA
+            # checkpoint is loaded in float16. Match the vision tower dtype;
+            # otherwise its first convolution rejects the input/bias pair.
+            vision_tower = getattr(self._model, "vision_tower", self._model)
+            try:
+                vision_dtype = next(vision_tower.parameters()).dtype
+            except StopIteration:
+                vision_dtype = pixel_values.dtype
+            pixel_values = pixel_values.to(dtype=vision_dtype)
+
+        with torch.no_grad():
+            generated_ids = self._model.generate(
+                input_ids=inputs["input_ids"],
+                pixel_values=pixel_values,
+                max_new_tokens=1024,
+                num_beams=3,
+                do_sample=False,
+            )
+        return list(self._processor.batch_decode(generated_ids, skip_special_tokens=False))
+
+    def _detect_model(self, source: Any, *, scale: float) -> list[TextDetection]:
+        working = source
+        if scale != 1.0:
+            working = source.resize(
+                (max(1, round(source.width * scale)),
+                 max(1, round(source.height * scale)))
+            )
+        generated_text = self._generate_model(self._model_inputs(working))
+        return self._parse_model_output(
+            generated_text[0],
+            source=source,
+            working_size=working.size,
+            scale=scale,
+        )
+
+    def _detect_model_batch(
+        self,
+        sources: list[Any],
+        *,
+        scale: float,
+    ) -> list[list[TextDetection]]:
+        if not sources:
+            return []
+        working: list[Any] = []
+        for source in sources:
+            if scale != 1.0:
+                source = source.resize(
+                    (max(1, round(source.width * scale)),
+                     max(1, round(source.height * scale)))
+                )
+            working.append(source)
+        generated_text = self._generate_model(
+            self._model_inputs(working, batch_size=len(working))
+        )
+        if len(generated_text) != len(sources):
+            raise ValueError(
+                f"Florence returned {len(generated_text)} responses for "
+                f"{len(sources)} inputs"
+            )
+        return [
+            self._parse_model_output(
+                text,
+                source=source,
+                working_size=working_item.size,
+                scale=scale,
+            )
+            for source, working_item, text in zip(sources, working, generated_text)
+        ]
 
     def detect(self, image: Any) -> list[TextDetection]:
         source = self._image(image)
@@ -1082,6 +1140,30 @@ class Florence2OCRBackend:
         except Exception:
             output = []
         return output or self._detect_fallback(source, preprocessed=True)
+
+    def detect_preprocessed_batch(
+        self, images: list[Any]
+    ) -> list[list[TextDetection]]:
+        """Batch C1 OCR while preserving per-image fallback behavior.
+
+        A backend/processor failure falls back to the existing single-image
+        method for every item. Empty model responses receive the same local
+        Tesseract fallback as ``detect_preprocessed``.
+        """
+        sources = [self._image(image) for image in images]
+        if not sources:
+            return []
+        try:
+            self._ensure_loaded()
+            outputs = self._detect_model_batch(sources, scale=1.0)
+        except Exception:
+            outputs = []
+        if len(outputs) != len(sources):
+            return [self.detect_preprocessed(source) for source in sources]
+        return [
+            output or self._detect_fallback(source, preprocessed=True)
+            for source, output in zip(sources, outputs)
+        ]
 
 
 class GOTOCR2Backend:
@@ -1163,6 +1245,10 @@ class SelectiveOCRBackend:
     """
 
     name = "tesseract+florence2-selective"
+    # A fallback crop can consume several ordered polarity/variant calls.
+    # C1 therefore replays this stateful path sequentially to preserve the
+    # exact shared-budget allocation of the reference implementation.
+    fallback_batch_order_sensitive = True
 
     def __init__(
         self,
@@ -1227,12 +1313,73 @@ class SelectiveOCRBackend:
         stronger = self._fallback_detect(image, method)
         return self._deduplicate(primary + stronger)
 
+    @property
+    def remaining_fallback_calls(self) -> int:
+        """Number of stronger-model slots still available for this image."""
+        return max(0, self.max_fallback_calls - self._fallback_calls)
+
+    @staticmethod
+    def _batch_call(
+        backend: OCRBackend,
+        method: str,
+        images: list[Any],
+    ) -> list[list[TextDetection]]:
+        if not images:
+            return []
+        batch_method = getattr(backend, f"{method}_batch", None)
+        if callable(batch_method) and len(images) > 1:
+            try:
+                raw = list(batch_method(images))
+                if len(raw) == len(images):
+                    return [list(item) for item in raw]
+            except Exception:
+                pass
+        return [SelectiveOCRBackend._call(backend, method, image) for image in images]
+
     def _fallback_detect(self, image: Any, method: str) -> list[TextDetection]:
         if self._fallback_calls >= self.max_fallback_calls:
             return []
         self._fallback_calls += 1
         return self._call(self.fallback, method, image)
 
+    def _fallback_detect_batch(
+        self,
+        images: list[Any],
+        method: str,
+    ) -> list[list[TextDetection]]:
+        """Reserve fallback slots in input order, then batch the reserved calls."""
+        if not images:
+            return []
+        allowed = min(len(images), self.remaining_fallback_calls)
+        results: list[list[TextDetection]] = [[] for _ in images]
+        if allowed <= 0:
+            return results
+
+        # Reserve before dispatch.  This makes the shared budget deterministic
+        # even when a backend internally yields or raises during generation.
+        self._fallback_calls += allowed
+        accepted = images[:allowed]
+        results[:allowed] = self._batch_call(self.fallback, method, accepted)
+        return results
+    def detect_primary_preprocessed(self, image: Any) -> list[TextDetection]:
+        """Run only cheap OCR; used by C1 across all of its resize scales."""
+        return self._call(self.primary, "detect_preprocessed", image)
+
+    def detect_primary_preprocessed_batch(
+        self, images: list[Any]
+    ) -> list[list[TextDetection]]:
+        """Batch only the cheap member; no fallback budget is consumed."""
+        return self._batch_call(self.primary, "detect_preprocessed", images)
+
+    def detect_fallback_preprocessed(self, image: Any) -> list[TextDetection]:
+        """Spend one bounded stronger-OCR call on a C1 crop if warranted."""
+        return self._fallback_detect(image, "detect_preprocessed")
+
+    def detect_fallback_preprocessed_batch(
+        self, images: list[Any]
+    ) -> list[list[TextDetection]]:
+        """Spend one reserved stronger-OCR slot per accepted C1 crop."""
+        return self._fallback_detect_batch(images, "detect_preprocessed")
     def detect(self, image: Any) -> list[TextDetection]:
         primary = self._call(self.primary, "detect", image)
         if not self._scene_fallback_done:
@@ -1245,14 +1392,6 @@ class SelectiveOCRBackend:
         # C1 uses the explicit primary/fallback methods below, so a direct
         # caller still receives the safe default cascade behavior.
         return self._detect(image, "detect_preprocessed")
-
-    def detect_primary_preprocessed(self, image: Any) -> list[TextDetection]:
-        """Run only cheap OCR; used by C1 across all of its resize scales."""
-        return self._call(self.primary, "detect_preprocessed", image)
-
-    def detect_fallback_preprocessed(self, image: Any) -> list[TextDetection]:
-        """Spend one bounded stronger-OCR call on a C1 crop if warranted."""
-        return self._fallback_detect(image, "detect_preprocessed")
 
 
 SAM3_CLASS_PROMPTS = ("sunglasses", "eyeglasses", "glasses", "rimless glasses")
@@ -1297,8 +1436,12 @@ class SAM3Localizer:
         duplicate_iou: float = 0.7,
         verbose: bool = False,
         release_callback: Callable[[], None] | None = None,
+        batch_predictor: Callable[[Path, list[str]], Any] | None = None,
+        prompt_batch_size: int = 1,
     ) -> None:
         self.predictor = predictor
+        self.batch_predictor = batch_predictor
+        self.prompt_batch_size = max(1, int(prompt_batch_size))
         self.score_threshold = float(score_threshold)
         self.rimless_threshold = float(rimless_threshold)
         self.duplicate_iou = float(duplicate_iou)
@@ -1365,6 +1508,40 @@ class SAM3Localizer:
             kept.append(candidate)
         return kept
 
+    def _detections_from_raw(
+        self,
+        image_path: Path,
+        prompt: str,
+        raw: Any,
+        *,
+        threshold: float,
+    ) -> list[LocalizationDetection]:
+        candidates = [
+            LocalizationDetection(box, score, prompt, mask_rle)
+            for box, score, mask_rle in self._predictions(raw)
+            if len(box) == 4 and score >= threshold
+        ]
+        return self._deduplicate(candidates)
+
+    @staticmethod
+    def _split_batch_result(raw: Any, prompts: list[str]) -> list[Any] | None:
+        """Normalize the native batch result without accepting ambiguous data."""
+        if isinstance(raw, Mapping):
+            results = raw.get("results", raw.get("by_prompt"))
+            if isinstance(results, Mapping):
+                values = [results.get(prompt) for prompt in prompts]
+                return values if all(value is not None for value in values) else None
+            if isinstance(results, (list, tuple)):
+                values = list(results)
+                return values if len(values) == len(prompts) and all(
+                    value is not None for value in values
+                ) else None
+            return None
+        if isinstance(raw, (list, tuple)) and len(raw) == len(prompts):
+            values = list(raw)
+            return values if all(value is not None for value in values) else None
+        return None
+
     def detect_prompt(
         self,
         image_path: Path,
@@ -1376,22 +1553,86 @@ class SAM3Localizer:
         limit = self.score_threshold if threshold is None else float(threshold)
         if self.verbose:
             print(f"[SAM3] start prompt={prompt!r} image={image_path.name}", flush=True)
-        candidates = [
-            LocalizationDetection(box, score, prompt, mask_rle)
-            for box, score, mask_rle in self._predictions(self.predictor(image_path, prompt))
-            if len(box) == 4 and score >= limit
-        ]
-        result = self._deduplicate(candidates)
+        result = self._detections_from_raw(
+            image_path,
+            prompt,
+            self.predictor(image_path, prompt),
+            threshold=limit,
+        )
         if self.verbose:
             print(f"[SAM3] done prompt={prompt!r} detections={len(result)}", flush=True)
         return result
 
+    def detect_prompts(
+        self,
+        image_path: Path,
+        prompts: list[str] | tuple[str, ...],
+        *,
+        thresholds: list[float] | tuple[float, ...] | None = None,
+    ) -> list[list[LocalizationDetection]]:
+        """Run discrete prompts in micro-batches, never as compound text.
+
+        Batch output is accepted only when it has an unambiguous one-result-
+        per-prompt shape. Any exception or shape mismatch replays the exact
+        single-prompt predictor for that chunk.
+        """
+        prompt_list = list(prompts)
+        if thresholds is None:
+            limits = [self.score_threshold] * len(prompt_list)
+        else:
+            limits = [float(value) for value in thresholds]
+            if len(limits) != len(prompt_list):
+                raise ValueError("thresholds must match prompts")
+        output: list[list[LocalizationDetection]] = []
+        for start in range(0, len(prompt_list), self.prompt_batch_size):
+            prompt_chunk = prompt_list[start : start + self.prompt_batch_size]
+            limit_chunk = limits[start : start + self.prompt_batch_size]
+            raw_results: list[Any] | None = None
+            if (
+                self.batch_predictor is not None
+                and len(prompt_chunk) > 1
+                and self.prompt_batch_size > 1
+            ):
+                try:
+                    raw_results = self._split_batch_result(
+                        self.batch_predictor(image_path, prompt_chunk),
+                        prompt_chunk,
+                    )
+                except Exception:
+                    raw_results = None
+            if raw_results is None:
+                output.extend([
+                    self.detect_prompt(image_path, prompt, threshold=limit)
+                    for prompt, limit in zip(prompt_chunk, limit_chunk)
+                ])
+                continue
+            try:
+                parsed_chunk = [
+                    self._detections_from_raw(
+                        image_path, prompt, raw, threshold=limit
+                    )
+                    for prompt, limit, raw in zip(prompt_chunk, limit_chunk, raw_results)
+                ]
+            except Exception:
+                # A correctly sized but malformed item is still a batch
+                # failure; replay the complete chunk sequentially.
+                parsed_chunk = [
+                    self.detect_prompt(image_path, prompt, threshold=limit)
+                    for prompt, limit in zip(prompt_chunk, limit_chunk)
+                ]
+            output.extend(parsed_chunk)
+        return output
+
     def detect(self, image_path: Path) -> list[LocalizationDetection]:
-        candidates: list[LocalizationDetection] = []
-        for prompt in SAM3_CLASS_PROMPTS:
-            threshold = self.rimless_threshold if prompt == "rimless glasses" else self.score_threshold
-            candidates.extend(self.detect_prompt(image_path, prompt, threshold=threshold))
-        return self._deduplicate(candidates)
+        per_prompt = self.detect_prompts(
+            image_path,
+            SAM3_CLASS_PROMPTS,
+            thresholds=[
+                self.rimless_threshold if prompt == "rimless glasses" else self.score_threshold
+                for prompt in SAM3_CLASS_PROMPTS
+            ],
+        )
+        return self._deduplicate([item for detections in per_prompt for item in detections])
 
 
 def build_native_sam3_localizer(
@@ -1400,6 +1641,8 @@ def build_native_sam3_localizer(
     device: str | None = None,
     threshold: float = 0.25,
     amp: bool = True,
+    prompt_batch_size: int = 1,
+    compile_model: bool = False,
 ) -> Localizer:
     """Adapt the existing native SAM3 runtime without importing brand logic."""
     checkpoint = Path(checkpoint).expanduser().resolve()
@@ -1422,6 +1665,7 @@ def build_native_sam3_localizer(
             device=device,
             threshold=threshold,
             amp=amp,
+            compile_model=compile_model,
         )
         print("[SAM3] model ready", flush=True)
 
@@ -1433,11 +1677,22 @@ def build_native_sam3_localizer(
                 filter_prompt=None,
             )
 
+        def batch_predictor(
+            image_path: Path, prompts: list[str]
+        ) -> list[dict[str, Any]]:
+            return counter.infer_prompts(
+                image_path,
+                prompts,
+                box_cleanup=False,
+            )
+
         return SAM3Localizer(
             predictor,
             score_threshold=threshold,
             verbose=True,
             release_callback=counter.release,
+            batch_predictor=batch_predictor,
+            prompt_batch_size=prompt_batch_size,
         )
     except Exception as exc:
         return HeuristicLocalizer(f"native SAM3 unavailable: {exc}")
