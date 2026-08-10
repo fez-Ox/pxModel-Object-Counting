@@ -309,15 +309,26 @@ class Sam3VerboseCounter:
 
     def __init__(self, checkpoint: Path, device: str, threshold: float, amp: bool = True):
         import torch
-        from sam3.model.sam3_image_processor import Sam3Processor
-        from sam3.model_builder import build_sam3_image_model
 
         self.torch = torch
         self.device = torch.device(device)
         self.amp = bool(amp and self.device.type == "cuda")
         self.threshold = float(threshold)
+        self.checkpoint = Path(checkpoint)
+        self.model = None
+        self.processor = None
+        self._cached_image_key: str | None = None
+        self._cached_image_state: dict | None = None
+        self._ensure_loaded()
+
+    def _ensure_loaded(self) -> None:
+        if self.model is not None and self.processor is not None:
+            return
+        from sam3.model.sam3_image_processor import Sam3Processor
+        from sam3.model_builder import build_sam3_image_model
+
         self.model = build_sam3_image_model(
-            checkpoint_path=str(checkpoint),
+            checkpoint_path=str(self.checkpoint),
             device=str(self.device),
             eval_mode=True,
         )
@@ -326,11 +337,6 @@ class Sam3VerboseCounter:
             device=self.device,
             confidence_threshold=self.threshold,
         )
-        # Class-agnostic attribution asks many text prompts for the same
-        # image. Keep the expensive image backbone features until the next
-        # image arrives; text grounding remains prompt-specific.
-        self._cached_image_key: str | None = None
-        self._cached_image_state: dict | None = None
 
     def release(self) -> None:
         """Release image features and model memory before another GPU stage."""
@@ -347,6 +353,7 @@ class Sam3VerboseCounter:
             self.torch.cuda.empty_cache()
 
     def _image_state(self, image_path: Path):
+        self._ensure_loaded()
         key = str(image_path.resolve())
         if self._cached_image_key == key and self._cached_image_state is not None:
             return self._cached_image_state
