@@ -308,7 +308,7 @@ def _save_remote_logs(kaggle: list[str], kernel_id: str, output_dir: Path) -> Pa
 def _save_remote_output(kaggle: list[str], kernel_id: str, output_dir: Path) -> bool:
     """Download partial artifacts before deleting a failed worker."""
     output_dir.mkdir(parents=True, exist_ok=True)
-    process = _run([*kaggle, "kernels", "output", kernel_id, "-p", str(output_dir)])
+    process = _run([*kaggle, "kernels", "output", kernel_id, "-p", str(output_dir), "--force"])
     if process.returncode == 0:
         print(f"Saved partial remote output: {output_dir}", flush=True)
         return True
@@ -455,7 +455,7 @@ def main(argv: list[str] | None = None) -> int:
         raise
 
     args.output.mkdir(parents=True, exist_ok=True)
-    output = _run([*kaggle, "kernels", "output", kernel_id, "-p", str(args.output)])
+    output = _run([*kaggle, "kernels", "output", kernel_id, "-p", str(args.output), "--force"])
     if output.returncode != 0:
         raise RuntimeError(f"Kaggle output download failed:\n{output.stdout}\n{output.stderr}")
     print(f"Results downloaded to {args.output}")
