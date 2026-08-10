@@ -1255,7 +1255,7 @@ class SelectiveOCRBackend:
         return self._fallback_detect(image, "detect_preprocessed")
 
 
-SAM3_CLASS_PROMPTS = ("sunglasses, eyeglasses, glasses", "rimless glasses")
+SAM3_CLASS_PROMPTS = ("sunglasses", "eyeglasses", "glasses", "rimless glasses")
 
 
 class Localizer(Protocol):

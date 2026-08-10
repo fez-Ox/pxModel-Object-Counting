@@ -88,9 +88,9 @@ class SAM3SceneFilter:
 
     def _detect(self, image_path: Path) -> dict[str, list[LocalizationDetection]]:
         prompts = {
-            "person": ("people, person, faces of people",),
-            "poster": ("advertisements, posters, billboards",),
-            "shelf": ("display shelves, retail shelves, shelf",),
+            "person": ("people", "person", "faces of people"),
+            "poster": ("advertisements", "posters", "billboards"),
+            "shelf": ("retail shelves", "display shelves", "shelf"),
         }
         thresholds = {
             "person": self.person_threshold,
