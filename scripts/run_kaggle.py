@@ -205,33 +205,28 @@ def set_notebook_runtime_options(
     max_images: int | None = None,
 ) -> None:
     """Patch bounded image selection in the temporary notebook copy."""
-    if target_image is None and max_images is None:
-        return
     data = json.loads(notebook_path.read_text(encoding="utf-8"))
     replacements = 0
     for cell in data.get("cells", []):
         if cell.get("cell_type") != "code":
             continue
         source = "".join(cell.get("source", []))
-        if target_image is not None:
-            source, count = re.subn(
-                r"(?m)^TARGET_IMAGE_NAME\s*=\s*.*$",
-                "TARGET_IMAGE_NAME = " + json.dumps(target_image),
-                source,
-            )
-            replacements += count
-        if max_images is not None:
-            if max_images < 1:
-                raise ValueError("--max-images must be positive")
-            source, count = re.subn(
-                r"(?m)^MAX_IMAGES\s*=\s*.*$",
-                f"MAX_IMAGES = {int(max_images)}",
-                source,
-            )
-            replacements += count
+        target_val = json.dumps(target_image) if target_image is not None else "None"
+        source, count1 = re.subn(
+            r"(?m)^TARGET_IMAGE_NAME\s*=\s*.*$",
+            f"TARGET_IMAGE_NAME = {target_val}",
+            source,
+        )
+        replacements += count1
+        max_val = f"{int(max_images)}" if max_images is not None else "None"
+        source, count2 = re.subn(
+            r"(?m)^MAX_IMAGES\s*=\s*.*$",
+            f"MAX_IMAGES = {max_val}",
+            source,
+        )
+        replacements += count2
         cell["source"] = source.splitlines(keepends=True)
-    expected = int(target_image is not None) + int(max_images is not None)
-    if replacements < expected:
+    if replacements < 2:
         raise RuntimeError("Could not patch the requested notebook runtime options.")
     notebook_path.write_text(json.dumps(data, indent=1) + "\n", encoding="utf-8")
 
