@@ -1454,10 +1454,8 @@ class PerceptionFrontend:
             key=lambda item: (item[0].confidence, item[0].bbox[1], item[0].bbox[0]),
             reverse=True,
         ):
-            duplicate_index: int | None = None
-            for previous_index, previous in enumerate(kept):
-                if candidate.brand != previous.brand:
-                    continue
+            is_duplicate = False
+            for previous in kept:
                 intersection = cls._intersection(candidate.bbox, previous.bbox)
                 min_area = min(
                     candidate.bbox[2] * candidate.bbox[3],
@@ -1471,12 +1469,10 @@ class PerceptionFrontend:
                 iou = intersection / union if union > 0 else 0.0
                 contained = intersection / min_area if min_area > 0 else 0.0
                 if iou >= 0.35 or contained >= 0.75:
-                    duplicate_index = previous_index
+                    is_duplicate = True
                     break
-            if duplicate_index is None:
+            if not is_duplicate:
                 kept.append(candidate)
-            elif candidate.confidence > kept[duplicate_index].confidence:
-                kept[duplicate_index] = candidate
 
         kept.sort(key=lambda sign: (sign.bbox[1], sign.bbox[0], sign.brand or ""))
         return [replace(sign, sign_id=f"s_{index:02d}") for index, sign in enumerate(kept, start=1)]
