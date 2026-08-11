@@ -118,7 +118,7 @@ def run_single_pass_prototype(
                 instance_id=matched_instance.id,
                 brand=match.brand,
                 confidence=det.confidence * match.score,
-                cue_name="C1",
+                cue="C1",
             ))
         else:
             c2_signs.append(Sign(
