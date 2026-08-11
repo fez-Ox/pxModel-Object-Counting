@@ -120,16 +120,28 @@ class OnProductBrandingCue:
 
     @staticmethod
     def _enhance_contrast(image: Any) -> Any:
-        """Apply adaptive contrast boost (CLAHE / autocontrast) for low-contrast branding."""
-        from PIL import ImageOps
+        """Apply tile-based CLAHE to luminance while preserving RGB chroma."""
+        import cv2
+        import numpy as np
+        from PIL import Image
 
-        return ImageOps.autocontrast(image, cutoff=2)
+        # Equalize only the L channel in CIELAB. Applying CLAHE independently
+        # to RGB channels can create color shifts around small logos.
+        rgb = np.asarray(image.convert("RGB"), dtype=np.uint8)
+        lab = cv2.cvtColor(rgb, cv2.COLOR_RGB2LAB)
+        lightness, channel_a, channel_b = cv2.split(lab)
+        clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+        enhanced_lightness = clahe.apply(lightness)
+        enhanced_lab = cv2.merge((enhanced_lightness, channel_a, channel_b))
+        enhanced_rgb = cv2.cvtColor(enhanced_lab, cv2.COLOR_LAB2RGB)
+        return Image.fromarray(enhanced_rgb, mode="RGB")
 
     @staticmethod
     def _invert_polarity(image: Any) -> Any:
-        """Invert image colors to read light-on-dark branding on dark temple arms."""
+        """Apply a photographic negative to read light-on-dark branding."""
         from PIL import ImageOps
 
+        # ImageOps.invert performs per-channel inversion: output = 255-input.
         return ImageOps.invert(image.convert("RGB"))
 
     def _scaled_variants(self, crop: Any, scale: float) -> list[Any]:
@@ -704,7 +716,7 @@ class SignageScopeCue:
         bottom_others: list[Sign] = []
         for sign in signs:
             sign_y_center = _center(sign.bbox)[1]
-            is_below = sign.bbox[1] >= max_inst_bottom - median_height * 0.25
+            is_below = sign.bbox[1] >= max_inst_bottom - median_height * 0.10
             if abs(sign_y_center - max_y_center) <= band_threshold and is_below:
                 bottom_headers.append(sign)
             else:

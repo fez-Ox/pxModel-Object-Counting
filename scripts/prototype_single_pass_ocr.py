@@ -31,7 +31,7 @@ from eyewear_localization.fusion import decide, fuse_evidence, smooth_continuity
 from eyewear_localization.schemas import Instance, Sign, Scope
 
 
-def tile_image(image: Image.Image, tile_size: int = 2500, overlap: int = 500) -> list[tuple[Image.Image, int, int]]:
+def tile_image(image: Image.Image, tile_size: int = 1600, overlap: int = 400) -> list[tuple[Image.Image, int, int]]:
     """Split image into overlapping full-resolution sub-tiles ensuring full image coverage."""
     width, height = image.size
     if width <= tile_size and height <= tile_size:
