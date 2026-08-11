@@ -690,6 +690,7 @@ def build_ocr_backend(
     scale: float = 2.0,
     gazetteer: Gazetteer | None = None,
     fallback_budget: int = 6,
+    florence_scene: str = "full",
 ) -> OCRBackend:
     if name == "none":
         return NullOCRBackend("disabled by configuration")
@@ -712,7 +713,14 @@ def build_ocr_backend(
         try:
             device = "cuda" if gpu is True or gpu == "cuda" else (gpu if isinstance(gpu, str) else None)
             model_id = "microsoft/Florence-2-base" if name == "florence2-base" else "microsoft/Florence-2-large"
-            return Florence2OCRBackend(model_id=model_id, device=device, scale=scale)
+            if florence_scene == "off":
+                return NullOCRBackend("florence2 disabled by florence_scene=off")
+            return Florence2OCRBackend(
+                model_id=model_id,
+                device=device,
+                scale=scale,
+                scene_mode=florence_scene,
+            )
         except Exception as exc:
             return NullOCRBackend(f"Florence2 unavailable: {exc}")
     if name == "got-ocr2":
@@ -738,16 +746,33 @@ def build_ocr_backend(
                 fallback = RapidOCRBackend(scale=scale)
             elif name in {"rapidocr+florence2", "rapidocr+florence2-large"}:
                 primary = RapidOCRBackend(scale=scale)
-                fallback = Florence2OCRBackend(model_id="microsoft/Florence-2-large", device=device, scale=scale)
+                fallback = Florence2OCRBackend(
+                    model_id="microsoft/Florence-2-large",
+                    device=device,
+                    scale=scale,
+                    scene_mode=florence_scene,
+                )
             elif name == "rapidocr+got-ocr2":
                 primary = RapidOCRBackend(scale=scale)
                 fallback = GOTOCR2Backend(device=device, scale=scale)
             elif name == "paddleocr+florence2":
                 primary = PaddleOCRBackend(scale=scale, device="cuda" if gpu is True or gpu == "cuda" else "cpu")
-                fallback = Florence2OCRBackend(model_id="microsoft/Florence-2-large", device=device, scale=scale)
+                fallback = Florence2OCRBackend(
+                    model_id="microsoft/Florence-2-large",
+                    device=device,
+                    scale=scale,
+                    scene_mode=florence_scene,
+                )
             else:
                 primary = EasyOCRBackend(gpu=gpu, scale=scale)
-                fallback = Florence2OCRBackend(model_id="microsoft/Florence-2-large", device=device, scale=scale)
+                fallback = Florence2OCRBackend(
+                    model_id="microsoft/Florence-2-large",
+                    device=device,
+                    scale=scale,
+                    scene_mode=florence_scene,
+                )
+            if florence_scene == "off":
+                return primary
             return SelectiveOCRBackend(
                 primary,
                 fallback,
@@ -761,9 +786,17 @@ def build_ocr_backend(
             return NullOCRBackend("tesseract+florence2 requires a gazetteer")
         try:
             device = "cuda" if gpu is True or gpu == "cuda" else (gpu if isinstance(gpu, str) else None)
+            primary = TesseractOCRBackend(scale=scale)
+            if florence_scene == "off":
+                return primary
             return SelectiveOCRBackend(
-                TesseractOCRBackend(scale=scale),
-                Florence2OCRBackend(model_id="microsoft/Florence-2-large", device=device, scale=scale),
+                primary,
+                Florence2OCRBackend(
+                    model_id="microsoft/Florence-2-large",
+                    device=device,
+                    scale=scale,
+                    scene_mode=florence_scene,
+                ),
                 gazetteer,
                 max_fallback_calls=fallback_budget,
             )
@@ -789,11 +822,13 @@ class Florence2OCRBackend:
         model_id: str = "microsoft/Florence-2-large",
         device: str | None = None,
         scale: float = 1.0,
+        scene_mode: str = "full",
     ) -> None:
         self.model_id = model_id
         self.name = "florence2"
         self.device = device
         self.scale = max(1.0, float(scale))
+        self.scene_mode = scene_mode
         self._processor = None
         self._model = None
         self._fallback: TesseractOCRBackend | None = None
@@ -1088,8 +1123,10 @@ class Florence2OCRBackend:
             # after the model's own image resize. Re-run one lower-display
             # crop, without any brand prompt, and map its regions back to the
             # source image. This remains one bounded scene-OCR pass plus one
-            # focused pass; C1 has its separate six-call budget.
-            if source.height >= 1600:
+            # focused pass; C1 has its separate six-call budget. The focused
+            # lower/column passes are skipped in ``quick`` scene mode (one
+            # full-frame pass only) to cut latency.
+            if self.scene_mode == "full" and source.height >= 1600:
                 tile_top = round(source.height * 0.55)
                 # Also split a wide display into four focused columns. A
                 # shared Oakley/Meta placard can cause full-width OCR to lock
@@ -1439,10 +1476,12 @@ class SAM3Localizer:
         release_callback: Callable[[], None] | None = None,
         batch_predictor: Callable[[Path, list[str]], Any] | None = None,
         prompt_batch_size: int = 1,
+        class_prompts: Iterable[str] = SAM3_CLASS_PROMPTS,
     ) -> None:
         self.predictor = predictor
         self.batch_predictor = batch_predictor
         self.prompt_batch_size = max(1, int(prompt_batch_size))
+        self.class_prompts = tuple(class_prompts)
         self.score_threshold = float(score_threshold)
         self.rimless_threshold = float(rimless_threshold)
         self.duplicate_iou = float(duplicate_iou)
@@ -1625,14 +1664,39 @@ class SAM3Localizer:
         return output
 
     def detect(self, image_path: Path) -> list[LocalizationDetection]:
-        per_prompt = self.detect_prompts(
-            image_path,
-            SAM3_CLASS_PROMPTS,
-            thresholds=[
+        return self.detect_classes(image_path, self.class_prompts)
+
+    def detect_classes(
+        self,
+        image_path: Path,
+        prompts: Iterable[str],
+        *,
+        threshold: float | None = None,
+    ) -> list[LocalizationDetection]:
+        """Run the given class prompts and de-duplicate the union.
+
+        A single explicit ``threshold`` overrides the per-prompt defaults
+        (used for a low-confidence retry when the first pass finds nothing).
+        """
+        prompt_list = list(prompts)
+        if threshold is not None:
+            limits = [float(threshold)] * len(prompt_list)
+        else:
+            limits = [
                 self.rimless_threshold if prompt == "rimless glasses" else self.score_threshold
-                for prompt in SAM3_CLASS_PROMPTS
-            ],
-        )
+                for prompt in prompt_list
+            ]
+        return self.detect_prompts_combined(image_path, prompt_list, thresholds=limits)
+
+    def detect_prompts_combined(
+        self,
+        image_path: Path,
+        prompts: list[str] | tuple[str, ...],
+        *,
+        thresholds: list[float] | tuple[float, ...] | None = None,
+    ) -> list[LocalizationDetection]:
+        """Run several prompts, flatten, and de-duplicate the union."""
+        per_prompt = self.detect_prompts(image_path, prompts, thresholds=thresholds)
         return self._deduplicate([item for detections in per_prompt for item in detections])
 
 
@@ -1644,6 +1708,7 @@ def build_native_sam3_localizer(
     amp: bool = True,
     prompt_batch_size: int = 1,
     compile_model: bool = False,
+    class_prompts: Iterable[str] = SAM3_CLASS_PROMPTS,
 ) -> Localizer:
     """Adapt the existing native SAM3 runtime without importing brand logic."""
     checkpoint = Path(checkpoint).expanduser().resolve()
@@ -1694,6 +1759,7 @@ def build_native_sam3_localizer(
             release_callback=counter.release,
             batch_predictor=batch_predictor,
             prompt_batch_size=prompt_batch_size,
+            class_prompts=class_prompts,
         )
     except Exception as exc:
         return HeuristicLocalizer(f"native SAM3 unavailable: {exc}")

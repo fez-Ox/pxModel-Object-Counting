@@ -1,5 +1,15 @@
 #!/usr/bin/env python3
-"""Standalone prototype test for Single-Pass Full-Native-Resolution / Tiled OCR + SAM3 + Overlap Attribution."""
+"""Standalone prototype test for Single-Pass Full-Native-Resolution / Tiled OCR + SAM3 + Overlap Attribution.
+
+Profiles and scene modes:
+  --sam3-profile {full,fast}   full: 4 class + 4 signage + 9 scene-filter prompts (legacy)
+                               fast: 2 class + 0 signage + 3 scene-filter prompts (~5 prompts)
+  --sam3-prompt-batch-size N   batch SAM3 prompts through set_text_prompts
+  --florence-scene {full,quick,off}
+                               full: one full-frame pass + lower crop + up to 4 column crops
+                               quick: one full-frame pass only
+                               off: primary OCR only (no Florence scene pass)
+"""
 
 import argparse
 import json
@@ -20,6 +30,8 @@ from eyewear_localization.gazetteer import Gazetteer
 from eyewear_localization.perception import (
     Florence2OCRBackend,
     RapidOCRBackend,
+    SAM3_CLASS_PROMPTS,
+    SAM3_SIGNAGE_PROMPTS,
     SAM3Localizer,
     TextDetection,
     build_native_sam3_localizer,
@@ -30,6 +42,27 @@ from eyewear_localization.scene_filter import SAM3SceneFilter
 from eyewear_localization.cues import Evidence, SignageScopeCue
 from eyewear_localization.fusion import decide, fuse_evidence, smooth_continuity
 from eyewear_localization.schemas import Instance, Sign, Scope
+
+DEFAULT_PERSON_PROMPTS = ("people", "person", "faces of people")
+DEFAULT_POSTER_PROMPTS = ("advertisements", "posters", "billboards")
+DEFAULT_SHELF_PROMPTS = ("retail shelves", "display shelves", "shelf")
+
+SAM3_PROFILES = {
+    "full": {
+        "class_prompts": SAM3_CLASS_PROMPTS,
+        "signage_prompts": SAM3_SIGNAGE_PROMPTS,
+        "person_prompts": DEFAULT_PERSON_PROMPTS,
+        "poster_prompts": DEFAULT_POSTER_PROMPTS,
+        "shelf_prompts": DEFAULT_SHELF_PROMPTS,
+    },
+    "fast": {
+        "class_prompts": ("sunglasses", "eyeglasses"),
+        "signage_prompts": (),
+        "person_prompts": ("people",),
+        "poster_prompts": ("advertisements",),
+        "shelf_prompts": ("retail shelves",),
+    },
+}
 
 
 def tile_image(image: Image.Image, tile_size: int = 1600, overlap: int = 400) -> list[tuple[Image.Image, int, int]]:
@@ -119,6 +152,12 @@ def run_single_pass_prototype(
     config: LocalizationConfig,
     tile_threshold: int = 2500,
     ocr_batch_size: int = 4,
+    class_prompts: tuple[str, ...] = SAM3_CLASS_PROMPTS,
+    signage_prompts: tuple[str, ...] = SAM3_SIGNAGE_PROMPTS,
+    person_prompts: tuple[str, ...] = DEFAULT_PERSON_PROMPTS,
+    poster_prompts: tuple[str, ...] = DEFAULT_POSTER_PROMPTS,
+    shelf_prompts: tuple[str, ...] = DEFAULT_SHELF_PROMPTS,
+    retry_threshold: float = 0.15,
 ) -> dict:
     start_time = time.perf_counter()
     image = Image.open(image_path).convert("RGB")
@@ -126,14 +165,23 @@ def run_single_pass_prototype(
 
     # --- Stage 1: SAM3 Instance Detection, Signage Placard Segmentation & Scene Filtering ---
     sam3_start = time.perf_counter()
-    raw_detections = localizer.detect(image_path)
-    raw_instances = detections_to_instances(raw_detections)
 
-    # SAM3 Open-Vocabulary Signage Prompts for physical base plates, placards, and labels
-    signage_prompts = ("brand placard", "display base plate", "brand plate", "shelf edge label")
+    class_list = list(class_prompts)
+    if hasattr(localizer, "detect_classes"):
+        raw_detections = localizer.detect_classes(image_path, class_list)
+        if not raw_detections:
+            raw_detections = localizer.detect_classes(
+                image_path, class_list, threshold=retry_threshold
+            )
+    else:
+        raw_detections = localizer.detect(image_path)
+    raw_instances = detections_to_instances(raw_detections)
+    sam3_class_time = time.perf_counter() - sam3_start
+
+    signage_start = time.perf_counter()
     signage_crops: list[tuple[Image.Image, int, int]] = []
     signage_boxes: list[list[float]] = []
-    if hasattr(localizer, "detect_prompts"):
+    if signage_prompts and hasattr(localizer, "detect_prompts"):
         try:
             signage_per_prompt = localizer.detect_prompts(
                 image_path,
@@ -154,24 +202,38 @@ def run_single_pass_prototype(
                         signage_boxes.append([x1, y1, x2 - x1, y2 - y1])
         except Exception:
             pass
+    sam3_signage_time = time.perf_counter() - signage_start
 
-    scene_filter = SAM3SceneFilter(localizer)
+    scene_start = time.perf_counter()
+    scene_filter = SAM3SceneFilter(
+        localizer,
+        person_prompts=person_prompts,
+        poster_prompts=poster_prompts,
+        shelf_prompts=shelf_prompts,
+    )
     instances, _ = scene_filter.filter(image_path, raw_instances)
     poster_regions = getattr(scene_filter, "last_poster_regions", [])
+    sam3_scene_time = time.perf_counter() - scene_start
     sam3_time = time.perf_counter() - sam3_start
 
     # --- Stage 2: Full-Resolution / Tiled OCR + SAM3 Signage Crop Pass ---
     ocr_start = time.perf_counter()
     tiles = tile_image(image, tile_size=tile_threshold, overlap=400)
-    
+
     # Process tiled full-resolution passes in GPU micro-batches
-    all_text_detections: list[TextDetection] = process_ocr_batches(tiles, ocr_backend, batch_size=ocr_batch_size)
+    tile_detections: list[TextDetection] = process_ocr_batches(
+        tiles, ocr_backend, batch_size=ocr_batch_size
+    )
+    ocr_tiles_time = time.perf_counter() - ocr_start
 
     # Process SAM3 segmented signage placard crops in GPU micro-batches
+    all_text_detections: list[TextDetection] = list(tile_detections)
     if signage_crops:
-        placard_detections = process_ocr_batches(signage_crops, ocr_backend, batch_size=ocr_batch_size)
+        placard_detections = process_ocr_batches(
+            signage_crops, ocr_backend, batch_size=ocr_batch_size
+        )
         all_text_detections.extend(placard_detections)
-    
+    ocr_signage_time = time.perf_counter() - ocr_start - ocr_tiles_time
     ocr_time = time.perf_counter() - ocr_start
 
     # --- Stage 3: Decoupled Spatial Attribution (C1 On-Product vs C2 Signage) ---
@@ -234,7 +296,12 @@ def run_single_pass_prototype(
         "outputs": [out.to_dict() for out in outputs],
         "timings": {
             "sam3_time_seconds": round(sam3_time, 3),
+            "sam3_class_seconds": round(sam3_class_time, 3),
+            "sam3_signage_seconds": round(sam3_signage_time, 3),
+            "sam3_scene_seconds": round(sam3_scene_time, 3),
             "single_pass_ocr_seconds": round(ocr_time, 3),
+            "ocr_tiles_seconds": round(ocr_tiles_time, 3),
+            "ocr_signage_crops_seconds": round(ocr_signage_time, 3),
             "c2_fusion_seconds": round(fusion_time, 3),
             "brand_association_seconds": round(ocr_time + fusion_time, 3),
             "total_pipeline_seconds": round(total_time, 3),
@@ -244,7 +311,103 @@ def run_single_pass_prototype(
             "physical_signs": len(c2_signs),
             "c1_evidence": len(c1_evidence),
             "c2_evidence": len(c2_evidence),
+            "sam3_prompts": len(class_list)
+            + len(signage_prompts)
+            + len(person_prompts)
+            + len(poster_prompts)
+            + len(shelf_prompts),
         },
+    }
+
+
+def _parse_profile_specs(raw: str) -> list[tuple[str, str]]:
+    specs: list[tuple[str, str]] = []
+    for token in raw.split(","):
+        token = token.strip()
+        if not token:
+            continue
+        parts = [part.strip() for part in token.split("/")]
+        sam3_profile = parts[0] or "full"
+        florence = parts[1] if len(parts) > 1 else "full"
+        if sam3_profile not in SAM3_PROFILES:
+            raise SystemExit(f"unknown --benchmark-profiles sam3 profile: {sam3_profile!r} "
+                             f"(choose from {sorted(SAM3_PROFILES)})")
+        specs.append((sam3_profile, florence))
+    return specs
+
+
+def run_images(
+    images: list[Path],
+    localizer: Any,
+    ocr_backend: Any,
+    gazetteer: Gazetteer,
+    config: LocalizationConfig,
+    profile: dict,
+    ocr_batch_size: int,
+    json_dir: Path,
+    vis_dir: Path,
+    save_outputs: bool,
+    out_tag: str | None = None,
+) -> dict:
+    results: dict = {}
+    total_sam3 = 0.0
+    total_ocr = 0.0
+    total_pipeline = 0.0
+    if out_tag:
+        json_dir = json_dir / out_tag
+        vis_dir = vis_dir / out_tag
+        json_dir.mkdir(parents=True, exist_ok=True)
+        vis_dir.mkdir(parents=True, exist_ok=True)
+    for img_path in images:
+        res = run_single_pass_prototype(
+            img_path,
+            localizer,
+            ocr_backend,
+            gazetteer,
+            config,
+            ocr_batch_size=ocr_batch_size,
+            class_prompts=profile["class_prompts"],
+            signage_prompts=profile["signage_prompts"],
+            person_prompts=profile["person_prompts"],
+            poster_prompts=profile["poster_prompts"],
+            shelf_prompts=profile["shelf_prompts"],
+        )
+        results[img_path.stem] = res
+
+        if save_outputs:
+            out_file = json_dir / f"{img_path.stem}.json"
+            out_file.write_text(json.dumps(res, indent=2))
+            try:
+                from eyewear_localization.visualization import annotate
+
+                annotated_img = annotate(img_path, res)
+                vis_file = vis_dir / f"{img_path.stem}_annotated.jpg"
+                annotated_img.save(vis_file)
+            except Exception as exc:
+                print(f"  Warning: could not render visualization for {img_path.stem}: {exc}")
+
+        t = res["timings"]
+        c = res["counts"]
+        total_sam3 += t["sam3_time_seconds"]
+        total_ocr += t["single_pass_ocr_seconds"]
+        total_pipeline += t["total_pipeline_seconds"]
+
+        print(
+            f"  {img_path.stem:12s} | Inst: {c['instances']:2d} | C1 Ev: {c['c1_evidence']:2d} | "
+            f"C2 Signs: {c['physical_signs']:2d} | Prompts: {c['sam3_prompts']:2d} | "
+            f"SAM3: {t['sam3_time_seconds']:6.2f}s | OCR: {t['single_pass_ocr_seconds']:6.2f}s | "
+            f"Total: {t['total_pipeline_seconds']:6.2f}s"
+        )
+
+    count = max(1, len(images))
+    return {
+        "results": results,
+        "total_sam3_seconds": total_sam3,
+        "total_ocr_seconds": total_ocr,
+        "total_pipeline_seconds": total_pipeline,
+        "avg_sam3_seconds": total_sam3 / count,
+        "avg_ocr_seconds": total_ocr / count,
+        "avg_total_seconds": total_pipeline / count,
     }
 
 
@@ -255,8 +418,17 @@ def main():
     parser.add_argument("--brand-file", required=True, help="Gazetteer brand file")
     parser.add_argument("--ocr-backend", default="rapidocr+florence2")
     parser.add_argument("--ocr-batch-size", type=int, default=4, help="Micro-batch size for GPU OCR sub-tile/placard inference (default: 4)")
+    parser.add_argument("--ocr-scale", type=float, default=2.0, help="Upscale factor before OCR (lower = faster; default: 2.0)")
+    parser.add_argument("--florence-scene", choices=["full", "quick", "off"], default="full",
+                        help="full: full-frame + lower + column passes; quick: single full pass; off: no Florence scene pass")
+    parser.add_argument("--sam3-profile", choices=list(SAM3_PROFILES), default="full",
+                        help="full: 4 class + 4 signage + 9 scene prompts; fast: 2 class + 0 signage + 3 scene prompts")
+    parser.add_argument("--sam3-prompt-batch-size", type=int, default=4,
+                        help="Batch SAM3 prompts through set_text_prompts (default: 4)")
     parser.add_argument("--benchmark-batch-sizes", type=str, default=None, help="Comma-separated batch sizes to benchmark (e.g. '1,2,4,8')")
     parser.add_argument("--max-benchmark-images", type=int, default=None, help="Limit number of images used for batch size benchmarking (e.g. 3)")
+    parser.add_argument("--benchmark-profiles", type=str, default=None,
+                        help="Comma-separated '<sam3>/<florence>' specs to benchmark, e.g. 'full/full,fast/quick,fast/off'")
     parser.add_argument("--device", default="cuda")
     parser.add_argument("--out", default="output/prototype_results")
     args = parser.parse_args()
@@ -265,12 +437,13 @@ def main():
     gazetteer = Gazetteer(brands)
     config = LocalizationConfig(gazetteer=brands, enable_highest_confidence_fallback=True)
 
-    localizer = build_native_sam3_localizer(args.sam3_checkpoint, device=args.device)
-    ocr_backend = build_ocr_backend(args.ocr_backend, gpu=args.device, gazetteer=gazetteer)
-    if hasattr(ocr_backend, "max_fallback_calls"):
-        ocr_backend.max_fallback_calls = 99
+    localizer = build_native_sam3_localizer(
+        args.sam3_checkpoint,
+        device=args.device,
+        prompt_batch_size=args.sam3_prompt_batch_size,
+    )
 
-    from eyewear_localization.visualization import annotate
+    from eyewear_localization.visualization import annotate  # noqa: F401
 
     base_out_dir = Path(args.out)
     json_dir = base_out_dir / "json"
@@ -286,58 +459,97 @@ def main():
         elif p.is_file():
             images.append(p)
 
-    batch_sizes_to_test = [args.ocr_batch_size]
-    benchmark_images = images
+    def _build_ocr(florence: str) -> Any:
+        backend = build_ocr_backend(
+            args.ocr_backend,
+            gpu=args.device,
+            gazetteer=gazetteer,
+            scale=args.ocr_scale,
+            florence_scene=florence,
+        )
+        if hasattr(backend, "max_fallback_calls"):
+            backend.max_fallback_calls = 99
+        return backend
+
+    if args.benchmark_profiles:
+        specs = _parse_profile_specs(args.benchmark_profiles)
+        print(f"\n=== PROFILE BENCHMARK ({len(images)} images | {len(specs)} specs) ===")
+        report: dict[str, dict] = {}
+        ocr_backend = None
+        prev_florence = None
+        for sam3_profile, florence in specs:
+            if florence != prev_florence:
+                ocr_backend = _build_ocr(florence)
+                prev_florence = florence
+            profile = SAM3_PROFILES[sam3_profile]
+            label = f"{sam3_profile}/{florence}"
+            n_prompts = sum(len(profile[key]) for key in
+                            ("class_prompts", "signage_prompts", "person_prompts", "poster_prompts", "shelf_prompts"))
+            print(f"\n--- profile {label} | {n_prompts} prompts ---")
+            run = run_images(
+                images, localizer, ocr_backend, gazetteer, config, profile,
+                args.ocr_batch_size, json_dir, vis_dir, save_outputs=True,
+                out_tag=label.replace("/", "__"),
+            )
+            report[label] = {
+                "sam3_profile": sam3_profile,
+                "florence_scene": florence,
+                "images": len(images),
+                "sam3_prompts": n_prompts,
+                "avg_sam3_seconds": round(run["avg_sam3_seconds"], 3),
+                "avg_ocr_seconds": round(run["avg_ocr_seconds"], 3),
+                "avg_total_seconds": round(run["avg_total_seconds"], 3),
+                "total_sam3_seconds": round(run["total_sam3_seconds"], 3),
+                "total_ocr_seconds": round(run["total_ocr_seconds"], 3),
+                "total_pipeline_seconds": round(run["total_pipeline_seconds"], 3),
+            }
+
+        if len(report) > 1:
+            print("\n" + "=" * 80)
+            print("=== PROFILE BENCHMARK SUMMARY ===")
+            print("=" * 80)
+            labels = list(report)
+            baseline_total = report[labels[0]]["avg_total_seconds"]
+            baseline_sam3 = report[labels[0]]["avg_sam3_seconds"]
+            print(f"{'Profile':<16} | {'SAM3':<8} | {'OCR':<8} | {'Total':<8} | {'Total Speedup':<16}")
+            print("-" * 70)
+            for label in labels:
+                r = report[label]
+                speedup = baseline_total / max(0.001, r["avg_total_seconds"])
+                print(f"{label:<16} | {r['avg_sam3_seconds']:<8.2f}s | {r['avg_ocr_seconds']:<8.2f}s | "
+                      f"{r['avg_total_seconds']:<8.2f}s | {speedup:<16.2f}x")
+            bench_file = base_out_dir / "profile_benchmark_results.json"
+            bench_file.write_text(json.dumps(report, indent=2))
+            print(f"\nBenchmark metrics saved to: {bench_file}")
+        return
+
     if args.benchmark_batch_sizes:
         batch_sizes_to_test = [int(b.strip()) for b in args.benchmark_batch_sizes.split(",") if b.strip()]
+        benchmark_images = images
         if args.max_benchmark_images and len(images) > args.max_benchmark_images:
             benchmark_images = images[:args.max_benchmark_images]
+    else:
+        batch_sizes_to_test = [args.ocr_batch_size]
+        benchmark_images = images
 
+    profile = SAM3_PROFILES[args.sam3_profile]
+    ocr_backend = _build_ocr(args.florence_scene)
     benchmark_report = {}
 
     for bs in batch_sizes_to_test:
         current_images = benchmark_images if len(batch_sizes_to_test) > 1 else images
-        print(f"\n=== PROTOTYPE OCR RUN ({len(current_images)} images | ocr_batch_size={bs}) ===")
-        results = {}
-        total_ocr_time = 0.0
-        total_pipeline_time = 0.0
-        
-        for img_path in current_images:
-            res = run_single_pass_prototype(
-                img_path, localizer, ocr_backend, gazetteer, config, ocr_batch_size=bs
-            )
-            results[img_path.stem] = res
-            
-            # Save JSON output for primary batch size or current iteration
-            out_file = json_dir / f"{img_path.stem}.json"
-            out_file.write_text(json.dumps(res, indent=2))
-            
-            try:
-                annotated_img = annotate(img_path, res)
-                vis_file = vis_dir / f"{img_path.stem}_annotated.jpg"
-                annotated_img.save(vis_file)
-            except Exception as exc:
-                print(f"  Warning: could not render visualization for {img_path.stem}: {exc}")
-
-            t = res["timings"]
-            c = res["counts"]
-            total_ocr_time += t['single_pass_ocr_seconds']
-            total_pipeline_time += t['total_pipeline_seconds']
-            
-            print(
-                f"  {img_path.stem:12s} | Inst: {c['instances']:2d} | C1 Ev: {c['c1_evidence']:2d} | "
-                f"C2 Signs: {c['physical_signs']:2d} | SAM3: {t['sam3_time_seconds']:6.2f}s | "
-                f"OCR: {t['single_pass_ocr_seconds']:6.2f}s | Total: {t['total_pipeline_seconds']:6.2f}s"
-            )
-
-        avg_ocr = total_ocr_time / max(1, len(images))
-        avg_total = total_pipeline_time / max(1, len(images))
+        print(f"\n=== PROTOTYPE OCR RUN ({len(current_images)} images | ocr_batch_size={bs} | "
+              f"sam3={args.sam3_profile} | florence={args.florence_scene} | scale={args.ocr_scale}) ===")
+        run = run_images(
+            current_images, localizer, ocr_backend, gazetteer, config, profile,
+            bs, json_dir, vis_dir, save_outputs=True,
+        )
         benchmark_report[bs] = {
             "batch_size": bs,
-            "avg_ocr_seconds": avg_ocr,
-            "avg_total_seconds": avg_total,
-            "total_ocr_seconds": total_ocr_time,
-            "total_pipeline_seconds": total_pipeline_time,
+            "avg_ocr_seconds": run["avg_ocr_seconds"],
+            "avg_total_seconds": run["avg_total_seconds"],
+            "total_ocr_seconds": run["total_ocr_seconds"],
+            "total_pipeline_seconds": run["total_pipeline_seconds"],
         }
 
     if len(benchmark_report) > 1:
@@ -350,7 +562,7 @@ def main():
         for bs, r in benchmark_report.items():
             speedup = baseline_ocr / max(0.001, r['avg_ocr_seconds'])
             print(f"{bs:<15d} | {r['avg_ocr_seconds']:<15.2f}s | {r['avg_total_seconds']:<15.2f}s | {speedup:<15.2f}x")
-        
+
         bench_file = base_out_dir / "ocr_batch_benchmark_results.json"
         bench_file.write_text(json.dumps(benchmark_report, indent=2))
         print(f"\nBenchmark metrics saved to: {bench_file}")

@@ -78,19 +78,25 @@ class SAM3SceneFilter:
         person_threshold: float = 0.25,
         poster_threshold: float = 0.25,
         shelf_threshold: float = 0.20,
+        person_prompts: tuple[str, ...] = ("people", "person", "faces of people"),
+        poster_prompts: tuple[str, ...] = ("advertisements", "posters", "billboards"),
+        shelf_prompts: tuple[str, ...] = ("retail shelves", "display shelves", "shelf"),
     ) -> None:
         self.localizer = localizer
         self.require_shelf = require_shelf
         self.person_threshold = person_threshold
         self.poster_threshold = poster_threshold
         self.shelf_threshold = shelf_threshold
+        self.person_prompts = tuple(person_prompts)
+        self.poster_prompts = tuple(poster_prompts)
+        self.shelf_prompts = tuple(shelf_prompts)
         self.last_poster_regions: list[PosterRegion] = []
 
     def _detect(self, image_path: Path) -> dict[str, list[LocalizationDetection]]:
         prompts = {
-            "person": ("people", "person", "faces of people"),
-            "poster": ("advertisements", "posters", "billboards"),
-            "shelf": ("retail shelves", "display shelves", "shelf"),
+            "person": self.person_prompts,
+            "poster": self.poster_prompts,
+            "shelf": self.shelf_prompts,
         }
         thresholds = {
             "person": self.person_threshold,
@@ -186,6 +192,9 @@ def build_scene_filter(
     person_threshold: float = 0.25,
     poster_threshold: float = 0.25,
     shelf_threshold: float = 0.20,
+    person_prompts: tuple[str, ...] = ("people", "person", "faces of people"),
+    poster_prompts: tuple[str, ...] = ("advertisements", "posters", "billboards"),
+    shelf_prompts: tuple[str, ...] = ("retail shelves", "display shelves", "shelf"),
 ) -> SceneFilter:
     if isinstance(localizer, SAM3Localizer):
         return SAM3SceneFilter(
@@ -194,5 +203,8 @@ def build_scene_filter(
             person_threshold=person_threshold,
             poster_threshold=poster_threshold,
             shelf_threshold=shelf_threshold,
+            person_prompts=person_prompts,
+            poster_prompts=poster_prompts,
+            shelf_prompts=shelf_prompts,
         )
     return NullSceneFilter("class-agnostic SAM3 scene filter unavailable")
