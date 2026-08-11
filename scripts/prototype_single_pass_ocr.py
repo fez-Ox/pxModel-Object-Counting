@@ -193,8 +193,13 @@ def main():
     localizer = build_native_sam3_localizer(args.sam3_checkpoint, device=args.device)
     ocr_backend = build_ocr_backend(args.ocr_backend, gpu=args.device, gazetteer=gazetteer)
 
-    output_dir = Path(args.out)
-    output_dir.mkdir(parents=True, exist_ok=True)
+    from eyewear_localization.visualization import annotate
+
+    base_out_dir = Path(args.out)
+    json_dir = base_out_dir / "json"
+    vis_dir = base_out_dir / "visualizations"
+    json_dir.mkdir(parents=True, exist_ok=True)
+    vis_dir.mkdir(parents=True, exist_ok=True)
 
     images = []
     for item in args.items:
@@ -209,8 +214,19 @@ def main():
     for img_path in images:
         res = run_single_pass_prototype(img_path, localizer, ocr_backend, gazetteer, config)
         results[img_path.stem] = res
-        out_file = output_dir / f"{img_path.stem}.json"
+        
+        # Save JSON output
+        out_file = json_dir / f"{img_path.stem}.json"
         out_file.write_text(json.dumps(res, indent=2))
+        
+        # Render and save visual bounding-box overlay image
+        try:
+            annotated_img = annotate(img_path, res)
+            vis_file = vis_dir / f"{img_path.stem}_annotated.jpg"
+            annotated_img.save(vis_file)
+        except Exception as exc:
+            print(f"  Warning: could not render visualization for {img_path.stem}: {exc}")
+
         t = res["timings"]
         c = res["counts"]
         print(
@@ -219,7 +235,7 @@ def main():
             f"OCR: {t['single_pass_ocr_seconds']:6.2f}s | Total: {t['total_pipeline_seconds']:6.2f}s"
         )
 
-    print("\nSummary Results Saved to:", output_dir)
+    print("\nSummary Results Saved to:", base_out_dir)
 
 
 if __name__ == "__main__":
