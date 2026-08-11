@@ -205,6 +205,8 @@ def main():
 
     localizer = build_native_sam3_localizer(args.sam3_checkpoint, device=args.device)
     ocr_backend = build_ocr_backend(args.ocr_backend, gpu=args.device, gazetteer=gazetteer)
+    if hasattr(ocr_backend, "max_fallback_calls"):
+        ocr_backend.max_fallback_calls = 99
 
     from eyewear_localization.visualization import annotate
 
