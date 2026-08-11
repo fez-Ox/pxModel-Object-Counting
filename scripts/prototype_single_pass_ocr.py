@@ -25,7 +25,7 @@ from eyewear_localization.perception import (
     build_ocr_backend,
     detections_to_instances,
 )
-from eyewear_localization.cues import Evidence, SpatialSignScopeCue
+from eyewear_localization.cues import Evidence, SignageScopeCue
 from eyewear_localization.fusion import decide, fuse_evidence, smooth_continuity
 from eyewear_localization.schemas import Instance, Sign, Scope
 
@@ -132,7 +132,7 @@ def run_single_pass_prototype(
 
     # --- Stage 4: C2 Signage Scope & Precision Cascade ---
     fusion_start = time.perf_counter()
-    c2_cue = SpatialSignScopeCue()
+    c2_cue = SignageScopeCue()
     scoped_signs, c2_evidence = c2_cue.associate(
         instances,
         c2_signs,
