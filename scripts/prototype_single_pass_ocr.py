@@ -256,6 +256,7 @@ def main():
     parser.add_argument("--ocr-backend", default="rapidocr+florence2")
     parser.add_argument("--ocr-batch-size", type=int, default=4, help="Micro-batch size for GPU OCR sub-tile/placard inference (default: 4)")
     parser.add_argument("--benchmark-batch-sizes", type=str, default=None, help="Comma-separated batch sizes to benchmark (e.g. '1,2,4,8')")
+    parser.add_argument("--max-benchmark-images", type=int, default=None, help="Limit number of images used for batch size benchmarking (e.g. 3)")
     parser.add_argument("--device", default="cuda")
     parser.add_argument("--out", default="output/prototype_results")
     args = parser.parse_args()
@@ -286,18 +287,22 @@ def main():
             images.append(p)
 
     batch_sizes_to_test = [args.ocr_batch_size]
+    benchmark_images = images
     if args.benchmark_batch_sizes:
         batch_sizes_to_test = [int(b.strip()) for b in args.benchmark_batch_sizes.split(",") if b.strip()]
+        if args.max_benchmark_images and len(images) > args.max_benchmark_images:
+            benchmark_images = images[:args.max_benchmark_images]
 
     benchmark_report = {}
 
     for bs in batch_sizes_to_test:
-        print(f"\n=== PROTOTYPE OCR RUN ({len(images)} images | ocr_batch_size={bs}) ===")
+        current_images = benchmark_images if len(batch_sizes_to_test) > 1 else images
+        print(f"\n=== PROTOTYPE OCR RUN ({len(current_images)} images | ocr_batch_size={bs}) ===")
         results = {}
         total_ocr_time = 0.0
         total_pipeline_time = 0.0
         
-        for img_path in images:
+        for img_path in current_images:
             res = run_single_pass_prototype(
                 img_path, localizer, ocr_backend, gazetteer, config, ocr_batch_size=bs
             )
