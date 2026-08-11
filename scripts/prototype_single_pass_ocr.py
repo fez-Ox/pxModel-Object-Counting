@@ -32,19 +32,32 @@ from eyewear_localization.schemas import Instance, Sign, Scope
 
 
 def tile_image(image: Image.Image, tile_size: int = 2500, overlap: int = 500) -> list[tuple[Image.Image, int, int]]:
-    """Split image into overlapping full-resolution sub-tiles if dimensions exceed threshold."""
+    """Split image into overlapping full-resolution sub-tiles ensuring full image coverage."""
     width, height = image.size
     if width <= tile_size and height <= tile_size:
         return [(image, 0, 0)]
 
-    tiles = []
-    x_steps = max(1, (width - overlap) // (tile_size - overlap))
-    y_steps = max(1, (height - overlap) // (tile_size - overlap))
+    x_coords = []
+    x = 0
+    while True:
+        x_coords.append(min(x, max(0, width - tile_size)))
+        if x + tile_size >= width:
+            break
+        x += tile_size - overlap
+    x_coords = sorted(list(set(x_coords)))
 
-    for y_idx in range(y_steps):
-        for x_idx in range(x_steps):
-            left = max(0, x_idx * (tile_size - overlap))
-            top = max(0, y_idx * (tile_size - overlap))
+    y_coords = []
+    y = 0
+    while True:
+        y_coords.append(min(y, max(0, height - tile_size)))
+        if y + tile_size >= height:
+            break
+        y += tile_size - overlap
+    y_coords = sorted(list(set(y_coords)))
+
+    tiles = []
+    for top in y_coords:
+        for left in x_coords:
             right = min(width, left + tile_size)
             bottom = min(height, top + tile_size)
             tile = image.crop((left, top, right, bottom))
