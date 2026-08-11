@@ -255,6 +255,7 @@ def main():
     parser.add_argument("--brand-file", required=True, help="Gazetteer brand file")
     parser.add_argument("--ocr-backend", default="rapidocr+florence2")
     parser.add_argument("--ocr-batch-size", type=int, default=4, help="Micro-batch size for GPU OCR sub-tile/placard inference (default: 4)")
+    parser.add_argument("--benchmark-batch-sizes", type=str, default=None, help="Comma-separated batch sizes to benchmark (e.g. '1,2,4,8')")
     parser.add_argument("--device", default="cuda")
     parser.add_argument("--out", default="output/prototype_results")
     args = parser.parse_args()
@@ -284,33 +285,70 @@ def main():
         elif p.is_file():
             images.append(p)
 
-    print(f"\n=== PROTOTYPE SINGLE-PASS OCR RUN ({len(images)} images, ocr_batch_size={args.ocr_batch_size}) ===")
-    results = {}
-    for img_path in images:
-        res = run_single_pass_prototype(
-            img_path, localizer, ocr_backend, gazetteer, config, ocr_batch_size=args.ocr_batch_size
-        )
-        results[img_path.stem] = res
-        
-        # Save JSON output
-        out_file = json_dir / f"{img_path.stem}.json"
-        out_file.write_text(json.dumps(res, indent=2))
-        
-        # Render and save visual bounding-box overlay image
-        try:
-            annotated_img = annotate(img_path, res)
-            vis_file = vis_dir / f"{img_path.stem}_annotated.jpg"
-            annotated_img.save(vis_file)
-        except Exception as exc:
-            print(f"  Warning: could not render visualization for {img_path.stem}: {exc}")
+    batch_sizes_to_test = [args.ocr_batch_size]
+    if args.benchmark_batch_sizes:
+        batch_sizes_to_test = [int(b.strip()) for b in args.benchmark_batch_sizes.split(",") if b.strip()]
 
-        t = res["timings"]
-        c = res["counts"]
-        print(
-            f"  {img_path.stem:12s} | Inst: {c['instances']:2d} | C1 Ev: {c['c1_evidence']:2d} | "
-            f"C2 Signs: {c['physical_signs']:2d} | SAM3: {t['sam3_time_seconds']:6.2f}s | "
-            f"OCR: {t['single_pass_ocr_seconds']:6.2f}s | Total: {t['total_pipeline_seconds']:6.2f}s"
-        )
+    benchmark_report = {}
+
+    for bs in batch_sizes_to_test:
+        print(f"\n=== PROTOTYPE OCR RUN ({len(images)} images | ocr_batch_size={bs}) ===")
+        results = {}
+        total_ocr_time = 0.0
+        total_pipeline_time = 0.0
+        
+        for img_path in images:
+            res = run_single_pass_prototype(
+                img_path, localizer, ocr_backend, gazetteer, config, ocr_batch_size=bs
+            )
+            results[img_path.stem] = res
+            
+            # Save JSON output for primary batch size or current iteration
+            out_file = json_dir / f"{img_path.stem}.json"
+            out_file.write_text(json.dumps(res, indent=2))
+            
+            try:
+                annotated_img = annotate(img_path, res)
+                vis_file = vis_dir / f"{img_path.stem}_annotated.jpg"
+                annotated_img.save(vis_file)
+            except Exception as exc:
+                print(f"  Warning: could not render visualization for {img_path.stem}: {exc}")
+
+            t = res["timings"]
+            c = res["counts"]
+            total_ocr_time += t['single_pass_ocr_seconds']
+            total_pipeline_time += t['total_pipeline_seconds']
+            
+            print(
+                f"  {img_path.stem:12s} | Inst: {c['instances']:2d} | C1 Ev: {c['c1_evidence']:2d} | "
+                f"C2 Signs: {c['physical_signs']:2d} | SAM3: {t['sam3_time_seconds']:6.2f}s | "
+                f"OCR: {t['single_pass_ocr_seconds']:6.2f}s | Total: {t['total_pipeline_seconds']:6.2f}s"
+            )
+
+        avg_ocr = total_ocr_time / max(1, len(images))
+        avg_total = total_pipeline_time / max(1, len(images))
+        benchmark_report[bs] = {
+            "batch_size": bs,
+            "avg_ocr_seconds": avg_ocr,
+            "avg_total_seconds": avg_total,
+            "total_ocr_seconds": total_ocr_time,
+            "total_pipeline_seconds": total_pipeline_time,
+        }
+
+    if len(benchmark_report) > 1:
+        print("\n" + "=" * 80)
+        print("=== BATCH SIZE BENCHMARK SUMMARY ===")
+        print("=" * 80)
+        baseline_ocr = benchmark_report[batch_sizes_to_test[0]]["avg_ocr_seconds"]
+        print(f"{'Batch Size (B)':<15} | {'Avg OCR Time':<15} | {'Avg Total Time':<15} | {'OCR Speedup':<15}")
+        print("-" * 70)
+        for bs, r in benchmark_report.items():
+            speedup = baseline_ocr / max(0.001, r['avg_ocr_seconds'])
+            print(f"{bs:<15d} | {r['avg_ocr_seconds']:<15.2f}s | {r['avg_total_seconds']:<15.2f}s | {speedup:<15.2f}x")
+        
+        bench_file = base_out_dir / "ocr_batch_benchmark_results.json"
+        bench_file.write_text(json.dumps(benchmark_report, indent=2))
+        print(f"\nBenchmark metrics saved to: {bench_file}")
 
     print("\nSummary Results Saved to:", base_out_dir)
 
