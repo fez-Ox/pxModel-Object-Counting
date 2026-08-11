@@ -276,11 +276,11 @@ def _push_directory(
 
 
 def _status(kaggle: list[str], kernel_id: str) -> tuple[int, str]:
-    for attempt in range(3):
+    for attempt in range(6):
         process = _run([*kaggle, "kernels", "status", kernel_id])
         if process.returncode == 0:
             return process.returncode, (process.stdout + process.stderr).strip()
-        time.sleep(3)
+        time.sleep(5)
     return process.returncode, (process.stdout + process.stderr).strip()
 
 
