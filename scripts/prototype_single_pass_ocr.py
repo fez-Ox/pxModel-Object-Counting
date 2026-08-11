@@ -72,13 +72,52 @@ def bbox_intersect(box1: list[float], box2: list[float]) -> bool:
     return not (x1 + w1 < x2 or x2 + w2 < x1 or y1 + h1 < y2 or y2 + h2 < y1)
 
 
+def process_ocr_batches(
+    items: list[tuple[Image.Image, int, int]],
+    ocr_backend: Any,
+    batch_size: int = 4,
+) -> list[TextDetection]:
+    """Process PIL image items (tiles or crops) in GPU micro-batches."""
+    if not items:
+        return []
+
+    detections: list[TextDetection] = []
+    batch_size = max(1, int(batch_size))
+
+    for i in range(0, len(items), batch_size):
+        chunk = items[i:i + batch_size]
+        chunk_images = [img for img, _, _ in chunk]
+
+        if hasattr(ocr_backend, "detect_batch"):
+            try:
+                chunk_results = ocr_backend.detect_batch(chunk_images)
+            except Exception:
+                chunk_results = [ocr_backend.detect(img) for img in chunk_images]
+        else:
+            chunk_results = [ocr_backend.detect(img) for img in chunk_images]
+
+        for (img, offset_x, offset_y), det_list in zip(chunk, chunk_results):
+            for det in det_list:
+                gx = det.bbox[0] + offset_x
+                gy = det.bbox[1] + offset_y
+                detections.append(TextDetection(
+                    text=det.text,
+                    bbox=[gx, gy, det.bbox[2], det.bbox[3]],
+                    confidence=det.confidence,
+                    source=det.source,
+                ))
+
+    return detections
+
+
 def run_single_pass_prototype(
     image_path: Path,
-    localizer: any,
-    ocr_backend: any,
+    localizer: Any,
+    ocr_backend: Any,
     gazetteer: Gazetteer,
     config: LocalizationConfig,
     tile_threshold: int = 2500,
+    ocr_batch_size: int = 4,
 ) -> dict:
     start_time = time.perf_counter()
     image = Image.open(image_path).convert("RGB")
@@ -123,40 +162,15 @@ def run_single_pass_prototype(
     # --- Stage 2: Full-Resolution / Tiled OCR + SAM3 Signage Crop Pass ---
     ocr_start = time.perf_counter()
     tiles = tile_image(image, tile_size=tile_threshold, overlap=400)
-    all_text_detections: list[TextDetection] = []
+    
+    # Process tiled full-resolution passes in GPU micro-batches
+    all_text_detections: list[TextDetection] = process_ocr_batches(tiles, ocr_backend, batch_size=ocr_batch_size)
 
-    # Process tiled full-resolution passes
-    for tile, offset_x, offset_y in tiles:
-        if hasattr(ocr_backend, "detect_preprocessed"):
-            tile_detections = ocr_backend.detect_preprocessed(tile)
-        else:
-            tile_detections = ocr_backend.detect(tile)
-        
-        for det in tile_detections:
-            gx = det.bbox[0] + offset_x
-            gy = det.bbox[1] + offset_y
-            all_text_detections.append(TextDetection(
-                text=det.text,
-                bbox=[gx, gy, det.bbox[2], det.bbox[3]],
-                confidence=det.confidence,
-                source=det.source,
-            ))
-
-    # Process SAM3 segmented signage placard crops
-    for crop, offset_x, offset_y in signage_crops:
-        if hasattr(ocr_backend, "detect_preprocessed"):
-            crop_dets = ocr_backend.detect_preprocessed(crop)
-        else:
-            crop_dets = ocr_backend.detect(crop)
-        for det in crop_dets:
-            gx = det.bbox[0] + offset_x
-            gy = det.bbox[1] + offset_y
-            all_text_detections.append(TextDetection(
-                text=det.text,
-                bbox=[gx, gy, det.bbox[2], det.bbox[3]],
-                confidence=det.confidence,
-                source=det.source,
-            ))
+    # Process SAM3 segmented signage placard crops in GPU micro-batches
+    if signage_crops:
+        placard_detections = process_ocr_batches(signage_crops, ocr_backend, batch_size=ocr_batch_size)
+        all_text_detections.extend(placard_detections)
+    
     ocr_time = time.perf_counter() - ocr_start
 
     # --- Stage 3: Decoupled Spatial Attribution (C1 On-Product vs C2 Signage) ---
@@ -239,6 +253,7 @@ def main():
     parser.add_argument("--sam3-checkpoint", required=True, help="Path to SAM3 checkpoint")
     parser.add_argument("--brand-file", required=True, help="Gazetteer brand file")
     parser.add_argument("--ocr-backend", default="rapidocr+florence2")
+    parser.add_argument("--ocr-batch-size", type=int, default=4, help="Micro-batch size for GPU OCR sub-tile/placard inference (default: 4)")
     parser.add_argument("--device", default="cuda")
     parser.add_argument("--out", default="output/prototype_results")
     args = parser.parse_args()
@@ -268,10 +283,12 @@ def main():
         elif p.is_file():
             images.append(p)
 
-    print(f"\n=== PROTOTYPE SINGLE-PASS OCR RUN ({len(images)} images) ===")
+    print(f"\n=== PROTOTYPE SINGLE-PASS OCR RUN ({len(images)} images, ocr_batch_size={args.ocr_batch_size}) ===")
     results = {}
     for img_path in images:
-        res = run_single_pass_prototype(img_path, localizer, ocr_backend, gazetteer, config)
+        res = run_single_pass_prototype(
+            img_path, localizer, ocr_backend, gazetteer, config, ocr_batch_size=args.ocr_batch_size
+        )
         results[img_path.stem] = res
         
         # Save JSON output
