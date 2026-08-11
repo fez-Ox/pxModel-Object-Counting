@@ -70,3 +70,7 @@ Single-file project. Entrypoint: `main.py` — tests DinoV2 and DinoV3 via Huggi
 
 - Test runner: `uv run pytest` inside `eyewear-localization/tests`
 - Standard Python 3.12 syntax with type annotations.
+- **Mandatory Preflight Audit Protocol**: BEFORE launching any remote Kaggle GPU execution (`uv run python scripts/run_kaggle.py`), ALWAYS perform:
+  1. **Local Preflight Execution**: Run a local CPU/GPU dry run (`uv run python scripts/prototype_single_pass_ocr.py ...`) to verify all imports, syntax, function signatures, and CLI arguments end-to-end.
+  2. **Notebook Cell Audit**: Thoroughly inspect all cells in `eyewear_localization_kaggle.ipynb` to verify that argument strings, function calls, and script paths match the codebase exactly.
+
