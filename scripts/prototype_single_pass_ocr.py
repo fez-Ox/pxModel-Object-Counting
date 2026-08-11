@@ -6,6 +6,7 @@ import json
 import sys
 import time
 from pathlib import Path
+from typing import Any
 from PIL import Image
 
 # Ensure eyewear-localization package is in Python path
