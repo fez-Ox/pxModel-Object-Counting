@@ -100,6 +100,8 @@ class SAM3SceneFilter:
         detections: dict[str, list[LocalizationDetection]] = {
             "person": [], "poster": [], "shelf": []
         }
+        if not hasattr(self.localizer, "detect_prompts"):
+            return detections
         for kind, candidates in prompts.items():
             per_prompt = self.localizer.detect_prompts(
                 image_path,

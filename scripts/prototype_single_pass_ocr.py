@@ -20,12 +20,12 @@ from eyewear_localization.perception import (
     Florence2OCRBackend,
     RapidOCRBackend,
     SAM3Localizer,
-    SAM3SceneFilter,
     TextDetection,
     build_native_sam3_localizer,
     build_ocr_backend,
     detections_to_instances,
 )
+from eyewear_localization.scene_filter import SAM3SceneFilter
 from eyewear_localization.cues import Evidence, SignageScopeCue
 from eyewear_localization.fusion import decide, fuse_evidence, smooth_continuity
 from eyewear_localization.schemas import Instance, Sign, Scope
