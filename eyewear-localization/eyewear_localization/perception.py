@@ -1395,6 +1395,7 @@ class SelectiveOCRBackend:
 
 
 SAM3_CLASS_PROMPTS = ("sunglasses", "eyeglasses", "glasses", "rimless glasses")
+SAM3_SIGNAGE_PROMPTS = ("brand placard", "display base plate", "brand plate", "shelf edge label")
 
 
 class Localizer(Protocol):

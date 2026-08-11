@@ -84,20 +84,48 @@ def run_single_pass_prototype(
     image = Image.open(image_path).convert("RGB")
     img_width, img_height = image.size
 
-    # --- Stage 1: SAM3 Instance Detection & Scene Filtering ---
+    # --- Stage 1: SAM3 Instance Detection, Signage Placard Segmentation & Scene Filtering ---
     sam3_start = time.perf_counter()
     raw_detections = localizer.detect(image_path)
     raw_instances = detections_to_instances(raw_detections)
+
+    # SAM3 Open-Vocabulary Signage Prompts for physical base plates, placards, and labels
+    signage_prompts = ("brand placard", "display base plate", "brand plate", "shelf edge label")
+    signage_crops: list[tuple[Image.Image, int, int]] = []
+    signage_boxes: list[list[float]] = []
+    if hasattr(localizer, "detect_prompts"):
+        try:
+            signage_per_prompt = localizer.detect_prompts(
+                image_path,
+                signage_prompts,
+                thresholds=[0.20] * len(signage_prompts),
+            )
+            for prompt_dets in signage_per_prompt:
+                for det in prompt_dets:
+                    bx, by, bw, bh = [int(v) for v in det.box]
+                    # Clamp bounding box
+                    x1 = max(0, bx)
+                    y1 = max(0, by)
+                    x2 = min(img_width, bx + bw)
+                    y2 = min(img_height, by + bh)
+                    if x2 - x1 > 20 and y2 - y1 > 10:
+                        crop = image.crop((x1, y1, x2, y2))
+                        signage_crops.append((crop, x1, y1))
+                        signage_boxes.append([x1, y1, x2 - x1, y2 - y1])
+        except Exception:
+            pass
+
     scene_filter = SAM3SceneFilter(localizer)
     instances, _ = scene_filter.filter(image_path, raw_instances)
     poster_regions = getattr(scene_filter, "last_poster_regions", [])
     sam3_time = time.perf_counter() - sam3_start
 
-    # --- Stage 2: Native Full-Resolution / Tiled OCR Pass ---
+    # --- Stage 2: Full-Resolution / Tiled OCR + SAM3 Signage Crop Pass ---
     ocr_start = time.perf_counter()
-    tiles = tile_image(image, tile_size=tile_threshold, overlap=500)
+    tiles = tile_image(image, tile_size=tile_threshold, overlap=400)
     all_text_detections: list[TextDetection] = []
 
+    # Process tiled full-resolution passes
     for tile, offset_x, offset_y in tiles:
         if hasattr(ocr_backend, "detect_preprocessed"):
             tile_detections = ocr_backend.detect_preprocessed(tile)
@@ -105,6 +133,22 @@ def run_single_pass_prototype(
             tile_detections = ocr_backend.detect(tile)
         
         for det in tile_detections:
+            gx = det.bbox[0] + offset_x
+            gy = det.bbox[1] + offset_y
+            all_text_detections.append(TextDetection(
+                text=det.text,
+                bbox=[gx, gy, det.bbox[2], det.bbox[3]],
+                confidence=det.confidence,
+                source=det.source,
+            ))
+
+    # Process SAM3 segmented signage placard crops
+    for crop, offset_x, offset_y in signage_crops:
+        if hasattr(ocr_backend, "detect_preprocessed"):
+            crop_dets = ocr_backend.detect_preprocessed(crop)
+        else:
+            crop_dets = ocr_backend.detect(crop)
+        for det in crop_dets:
             gx = det.bbox[0] + offset_x
             gy = det.bbox[1] + offset_y
             all_text_detections.append(TextDetection(
