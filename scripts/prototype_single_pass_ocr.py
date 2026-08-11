@@ -201,7 +201,7 @@ def main():
 
     brands = [line.strip() for line in Path(args.brand_file).read_text().splitlines() if line.strip()]
     gazetteer = Gazetteer(brands)
-    config = LocalizationConfig(gazetteer=brands)
+    config = LocalizationConfig(gazetteer=brands, enable_highest_confidence_fallback=True)
 
     localizer = build_native_sam3_localizer(args.sam3_checkpoint, device=args.device)
     ocr_backend = build_ocr_backend(args.ocr_backend, gpu=args.device, gazetteer=gazetteer)

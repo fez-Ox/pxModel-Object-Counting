@@ -21,12 +21,51 @@ def _softmax(scores: dict[str, float], temperature: float) -> dict[str, float]:
     return {key: value / total for key, value in exponentials.items()}
 
 
+def _support_float(item: Evidence, key: str) -> float:
+    """Read an optional numeric ranking field from evidence support."""
+    value = item.support.get(key, 0.0)
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _c1_rank_key(item: Evidence) -> tuple[float, float, float, int]:
+    """Rank competing C1 reads without consulting any other cue.
+
+    ``Evidence.confidence`` already includes OCR confidence, gazetteer match
+    quality, and the existing spatial proximity weight. The support fields
+    provide deterministic tie-breakers that favor text nearer the product
+    box and higher-confidence OCR.
+    """
+    return (
+        item.confidence,
+        _support_float(item, "spatial_weight"),
+        _support_float(item, "ocr_confidence"),
+        int(item.support.get("match_method") == "exact"),
+    )
+
+
+def _strongest_c1_brand(items: list[Evidence]) -> str | None:
+    """Return the strongest physical-brand candidate for one instance."""
+    candidates = [item for item in items if item.cue == "C1"]
+    if not candidates:
+        return None
+    return max(candidates, key=_c1_rank_key).brand
+
+
 def fuse_evidence(
     instances: Iterable[Instance],
     evidence: list[Evidence],
     config: LocalizationConfig,
 ) -> dict[str, dict[str, float]]:
-    """Apply the default reliability-weighted fusion equation."""
+    """Apply reliability-weighted fusion with ranked C1 competition.
+
+    C1 is a physical-product cue, so the strongest C1 brand candidate for an
+    instance receives the configured full C1 reliability. Other C1 brand
+    candidates remain visible and contribute at a reduced factor. C2/C4 are
+    never used to rank or scale C1 candidates.
+    """
     instances = list(instances)
     grouped: dict[str, list[Evidence]] = defaultdict(list)
     valid_ids = {instance.id for instance in instances}
@@ -42,8 +81,16 @@ def fuse_evidence(
         # competes only among brands supported by its own evidence and the
         # explicit unknown alternative.
         scores: dict[str, float] = {"unknown": config.unknown_prior}
+        strongest_c1_brand = _strongest_c1_brand(grouped[instance.id])
         for item in grouped[instance.id]:
-            contribution = config.cue_reliability.get(item.cue, 0.0) * item.confidence
+            reliability = config.cue_reliability.get(item.cue, 0.0)
+            if (
+                item.cue == "C1"
+                and strongest_c1_brand is not None
+                and item.brand != strongest_c1_brand
+            ):
+                reliability *= config.c1_competitor_weight
+            contribution = reliability * item.confidence
             if config.max_per_evidence is not None:
                 contribution = min(contribution, config.max_per_evidence)
             scores[item.brand] = scores.get(item.brand, 0.0) + contribution
@@ -201,6 +248,32 @@ def decide(
                 )
             )
             continue
+
+        # Tier 3: Highest-Confidence Evidence Fallback for soft C2 signage evidence
+        if getattr(config, "enable_highest_confidence_fallback", False):
+            soft_c2 = next((ev for ev in inst_evidence if ev.cue == "C2" and ev.confidence >= 0.40), None)
+            if soft_c2:
+                competing = [ev for ev in inst_evidence if ev.brand != soft_c2.brand and ev.confidence >= 0.15]
+                if not competing:
+                    outputs.append(
+                        AttributionOutput(
+                            instance_id=instance.id,
+                            brand=soft_c2.brand,
+                            abstained=False,
+                            probabilities=values,
+                            evidence=inst_evidence,
+                            decision_debug={
+                                "gate": "highest_confidence_fallback",
+                                "path": "C2_highest_confidence",
+                                "c2_confidence": soft_c2.confidence,
+                                "competing_count": 0,
+                            },
+                            product_brand=product_brand,
+                            zone_brand=soft_c2.brand,
+                            decision_path="C2_highest_confidence",
+                        )
+                    )
+                    continue
 
         if c4_ev:
             outputs.append(

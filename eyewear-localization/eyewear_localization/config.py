@@ -20,10 +20,12 @@ class LocalizationConfig:
     tau: float = 0.6
     margin: float = 0.15
     max_per_evidence: float | None = None
+    c1_competitor_weight: float = 0.25
     smoothing_lambda: float = 0.25
     smoothing_gate_punknown: float = 0.5
     use_vlm_audit: bool = True
     uncertainty_band: tuple[float, float] = (0.45, 0.70)
+    enable_highest_confidence_fallback: bool = False
     cascade_t1: float = 0.70
     cascade_t2: float = 0.75
     cascade_t4: float = 0.85
@@ -75,6 +77,9 @@ class LocalizationConfig:
         self.margin = _probability(self.margin, "margin")
         if self.max_per_evidence is not None:
             self.max_per_evidence = _nonnegative(self.max_per_evidence, "max_per_evidence")
+        self.c1_competitor_weight = _probability(
+            self.c1_competitor_weight, "fusion.c1_competitor_weight"
+        )
         self.smoothing_lambda = _probability(self.smoothing_lambda, "smoothing_lambda")
         self.smoothing_gate_punknown = _probability(
             self.smoothing_gate_punknown, "smoothing_gate_punknown"
@@ -96,6 +101,7 @@ class LocalizationConfig:
                 "tau": self.tau,
                 "margin": self.margin,
                 "max_per_evidence": self.max_per_evidence,
+                "c1_competitor_weight": self.c1_competitor_weight,
             },
             "smoothing": {
                 "lambda": self.smoothing_lambda,
@@ -199,6 +205,7 @@ def config_from_mapping(raw: Mapping[str, Any]) -> LocalizationConfig:
         tau=float(fusion.get("tau", 0.6)),
         margin=float(fusion.get("margin", 0.15)),
         max_per_evidence=None if fusion.get("max_per_evidence") in (None, "none") else float(fusion.get("max_per_evidence")),
+        c1_competitor_weight=float(fusion.get("c1_competitor_weight", 0.25)),
         smoothing_lambda=float(smoothing.get("lambda", 0.25)),
         smoothing_gate_punknown=float(smoothing.get("gate_punknown", 0.5)),
         use_vlm_audit=bool(cascade.get("use_vlm_audit", True)),
