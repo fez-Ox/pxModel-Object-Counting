@@ -20,6 +20,7 @@ from eyewear_localization.perception import (
     Florence2OCRBackend,
     RapidOCRBackend,
     SAM3Localizer,
+    SAM3SceneFilter,
     TextDetection,
     build_native_sam3_localizer,
     build_ocr_backend,
@@ -70,10 +71,13 @@ def run_single_pass_prototype(
     image = Image.open(image_path).convert("RGB")
     img_width, img_height = image.size
 
-    # --- Stage 1: SAM3 Instance Detection ---
+    # --- Stage 1: SAM3 Instance Detection & Scene Filtering ---
     sam3_start = time.perf_counter()
     raw_detections = localizer.detect(image_path)
-    instances = detections_to_instances(raw_detections)
+    raw_instances = detections_to_instances(raw_detections)
+    scene_filter = SAM3SceneFilter(localizer)
+    instances, _ = scene_filter.filter(image_path, raw_instances)
+    poster_regions = getattr(scene_filter, "last_poster_regions", [])
     sam3_time = time.perf_counter() - sam3_start
 
     # --- Stage 2: Native Full-Resolution / Tiled OCR Pass ---
@@ -136,7 +140,7 @@ def run_single_pass_prototype(
     scoped_signs, c2_evidence = c2_cue.associate(
         instances,
         c2_signs,
-        [],
+        poster_regions,
         image_width=float(img_width),
         text_detections=all_text_detections,
     )
