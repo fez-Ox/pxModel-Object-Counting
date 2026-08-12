@@ -448,11 +448,12 @@ def run_single_pass_prototype(
 
 
 def _parse_profile_specs(raw: str) -> list[dict]:
-    """Parse '<sam3>[:<florence>[:<ocr_mode>[:<ocr_scale>[:<backend>]]]]' tokens.
+    """Parse '<sam3>[:<florence>[:<ocr_mode>[:<ocr_scale>[:<backend>[:<crop_backend>]]]]]' tokens.
 
     ':'-separated fields with defaults for the omitted parts, e.g.
     'fast:quick:single:1.0', 'fast:off', or 'full/full' (legacy '/' form).
-    A 5th field overrides --ocr-backend for that spec.
+    A 5th field overrides --ocr-backend for that spec; a 6th field overrides
+    --crop-ocr-backend (the OCR engine applied to SAM3 signage crops).
     """
     specs: list[dict] = []
     for token in raw.split(","):
@@ -466,6 +467,7 @@ def _parse_profile_specs(raw: str) -> list[dict]:
         ocr_mode = parts[2] if len(parts) > 2 and parts[2] else "tiled"
         ocr_scale = parts[3] if len(parts) > 3 and parts[3] else None
         backend = parts[4] if len(parts) > 4 and parts[4] else None
+        crop_backend = parts[5] if len(parts) > 5 and parts[5] else None
         if sam3_profile not in SAM3_PROFILES:
             raise SystemExit(f"unknown --benchmark-profiles sam3 profile: {sam3_profile!r} "
                              f"(choose from {sorted(SAM3_PROFILES)})")
@@ -473,14 +475,58 @@ def _parse_profile_specs(raw: str) -> list[dict]:
             raise SystemExit(f"unknown ocr_mode in profile spec: {ocr_mode!r}")
         if florence not in ("full", "quick", "off"):
             raise SystemExit(f"unknown florence scene in profile spec: {florence!r}")
+        if crop_backend not in (None, "rapidocr", "easyocr", "tesseract", "florence2"):
+            raise SystemExit(f"unknown crop_ocr_backend in profile spec: {crop_backend!r} "
+                             f"(choose from rapidocr, easyocr, tesseract, florence2)")
         specs.append({
             "sam3_profile": sam3_profile,
             "florence": florence,
             "ocr_mode": ocr_mode,
             "ocr_scale": float(ocr_scale) if ocr_scale is not None else None,
             "backend": backend,
+            "crop_backend": crop_backend,
         })
     return specs
+
+
+class _BoundedTesseractCropBackend:
+    """Tesseract on SAM3 signage crops: 4 polarity variants at 2x, no band pass.
+
+    The reference's winning reads used the polarity variants, but running them
+    on full 4K tiles cost 22-68s/image.  On small signage crops (2x upscaled,
+    far below the max-dimension cap) the same 4 variants cost ~1-3s per crop
+    while keeping the exact read path that reaches the hard images.
+    """
+
+    name = "tesseract-bounded"
+    reliability = 0.95
+
+    def __init__(self, *, scale: float = 2.0) -> None:
+        from eyewear_localization.perception import TesseractOCRBackend
+
+        self.scale = max(1.0, float(scale))
+        self._backend = TesseractOCRBackend(scale=1.0)
+
+    def detect(self, image: Any) -> list[Any]:
+        if isinstance(image, (str, Path)):
+            with Image.open(image) as img:
+                source = img.convert("RGB")
+        elif isinstance(image, Image.Image):
+            source = image.convert("RGB")
+        else:
+            source = Image.fromarray(image).convert("RGB")
+        if self.scale != 1.0:
+            source = source.resize(
+                (max(1, round(source.width * self.scale)),
+                 max(1, round(source.height * self.scale)))
+            )
+        return self._backend.detect_preprocessed(source)
+
+    def detect_batch(self, images: list[Any]) -> list[list[Any]]:
+        return [self.detect(image) for image in images]
+
+    def reset_budget(self) -> None:
+        pass
 
 
 def run_images(
@@ -572,6 +618,9 @@ def main():
     parser.add_argument("--sam3-checkpoint", required=True, help="Path to SAM3 checkpoint")
     parser.add_argument("--brand-file", required=True, help="Gazetteer brand file")
     parser.add_argument("--ocr-backend", default="rapidocr+florence2")
+    parser.add_argument("--crop-ocr-backend", choices=["rapidocr", "easyocr", "tesseract", "florence2"],
+                        default="rapidocr",
+                        help="OCR engine for SAM3 signage-detect crops (default: rapidocr)")
     parser.add_argument("--ocr-batch-size", type=int, default=4, help="Micro-batch size for GPU OCR sub-tile/placard inference (default: 4)")
     parser.add_argument("--ocr-scale", type=float, default=1.0, help="Upscale factor before OCR (lower = faster; default: 1.0)")
     parser.add_argument("--ocr-mode", choices=["tiled", "single"], default="tiled",
@@ -586,7 +635,7 @@ def main():
     parser.add_argument("--benchmark-batch-sizes", type=str, default=None, help="Comma-separated batch sizes to benchmark (e.g. '1,2,4,8')")
     parser.add_argument("--max-benchmark-images", type=int, default=None, help="Limit number of images used for batch size benchmarking (e.g. 3)")
     parser.add_argument("--benchmark-profiles", type=str, default=None,
-                        help="Comma-separated '<sam3>:<florence>:<mode>:<scale>' specs, e.g. 'fast:quick:single:1.0,fast:off:single:1.0'")
+                        help="Comma-separated '<sam3>:<florence>:<mode>:<scale>[:<backend>[:<crop_backend>]]' specs, e.g. 'fast:off:single:1.0'")
     parser.add_argument("--device", default="cuda")
     parser.add_argument("--out", default="output/prototype_results")
     args = parser.parse_args()
@@ -637,22 +686,48 @@ def main():
             diag.write_text(json.dumps({name: reason}, indent=2))
         return backend
 
-    def _build_crop_ocr_backend() -> Any:
+    def _build_crop_ocr_backend(crop_engine: str | None = None) -> Any:
         """OCR backend for SAM3 signage-detect crops.
 
-        RapidOCR at 2x upscale: crop-sized inputs stay under the max_dimension
-        cap so display text gets a true 2x resolution boost with no VLM cost.
+        Crop-sized inputs stay far under each engine's max-dimension cap, so a
+        2x upscale gives display text a true resolution boost with bounded
+        per-crop cost.  Engines:
+          rapidocr   RapidOCR at 2x (control; full-frame engine parity)
+          easyocr    EasyOCR on GPU at 2x (~0.2-0.5s per crop)
+          tesseract  bounded polarity-variant pass at 2x (reference read path)
+          florence2  Florence-2-base single quick pass at 2x (GPU VLM)
         """
-        backend = globals().get("_crop_ocr_backend_cache")
-        if backend is not None:
-            return backend
+        engine = crop_engine or "rapidocr"
+        cached = globals().get("_crop_ocr_backend_cache") or {}
+        if engine in cached:
+            return cached[engine]
+        backend: Any = None
         try:
-            from eyewear_localization.perception import RapidOCRBackend
+            if engine == "rapidocr":
+                from eyewear_localization.perception import RapidOCRBackend
 
-            backend = RapidOCRBackend(scale=2.0)
+                backend = RapidOCRBackend(scale=2.0)
+            elif engine == "easyocr":
+                from eyewear_localization.perception import EasyOCRBackend
+
+                backend = EasyOCRBackend(gpu=args.device, scale=2.0)
+            elif engine == "tesseract":
+                backend = _BoundedTesseractCropBackend(scale=2.0)
+            elif engine == "florence2":
+                from eyewear_localization.perception import Florence2OCRBackend
+
+                device = "cuda" if args.device in ("cuda", True) else (
+                    args.device if isinstance(args.device, str) else None)
+                backend = Florence2OCRBackend(
+                    model_id="microsoft/Florence-2-base",
+                    device=device,
+                    scale=2.0,
+                    scene_mode="quick",
+                )
         except Exception:
             backend = None
-        globals()["_crop_ocr_backend_cache"] = backend
+        cached[engine] = backend
+        globals()["_crop_ocr_backend_cache"] = cached
         return backend
 
 
@@ -662,21 +737,24 @@ def main():
         report: dict[str, dict] = {}
         ocr_backend = None
         prev_key = None
-        crop_ocr_backend = _build_crop_ocr_backend()
         for spec in specs:
             sam3_profile = spec["sam3_profile"]
             florence = spec["florence"]
             ocr_mode = spec["ocr_mode"]
             ocr_scale = spec["ocr_scale"] if spec["ocr_scale"] is not None else args.ocr_scale
             backend_spec = spec["backend"]
+            crop_engine = spec["crop_backend"] or args.crop_ocr_backend
             key = (backend_spec, florence, ocr_mode, ocr_scale)
             if key != prev_key:
                 ocr_backend = _build_ocr(florence, ocr_scale, backend_name=backend_spec)
                 prev_key = key
+            crop_ocr_backend = _build_crop_ocr_backend(crop_engine)
             profile = SAM3_PROFILES[sam3_profile]
             label = f"{sam3_profile}/{florence}/{ocr_mode}@{ocr_scale}"
             if backend_spec and backend_spec != args.ocr_backend:
                 label = f"{label}+{backend_spec}"
+            if crop_engine != args.crop_ocr_backend:
+                label = f"{label}+crop{crop_engine}"
             n_prompts = sum(len(profile[key]) for key in
                             ("class_prompts", "signage_prompts", "person_prompts", "poster_prompts", "shelf_prompts"))
             print(f"\n--- profile {label} | {n_prompts} prompts | mode={ocr_mode} scale={ocr_scale} ---")
@@ -692,6 +770,7 @@ def main():
                 "ocr_mode": ocr_mode,
                 "ocr_scale": ocr_scale,
                 "ocr_backend": backend_spec or args.ocr_backend,
+                "crop_ocr_backend": crop_engine,
                 "images": len(images),
                 "sam3_prompts": n_prompts,
                 "avg_sam3_seconds": round(run["avg_sam3_seconds"], 3),
@@ -732,7 +811,7 @@ def main():
 
     profile = SAM3_PROFILES[args.sam3_profile]
     ocr_backend = _build_ocr(args.florence_scene, args.ocr_scale)
-    crop_ocr_backend = _build_crop_ocr_backend()
+    crop_ocr_backend = _build_crop_ocr_backend(args.crop_ocr_backend)
     benchmark_report = {}
 
     for bs in batch_sizes_to_test:
