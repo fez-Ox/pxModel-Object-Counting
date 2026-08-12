@@ -355,10 +355,11 @@ def run_single_pass_prototype(
 
 
 def _parse_profile_specs(raw: str) -> list[dict]:
-    """Parse '<sam3>[:<florence>[:<ocr_mode>[:<ocr_scale>]]]' tokens.
+    """Parse '<sam3>[:<florence>[:<ocr_mode>[:<ocr_scale>[:<backend>]]]]' tokens.
 
     ':'-separated fields with defaults for the omitted parts, e.g.
     'fast:quick:single:1.0', 'fast:off', or 'full/full' (legacy '/' form).
+    A 5th field overrides --ocr-backend for that spec.
     """
     specs: list[dict] = []
     for token in raw.split(","):
@@ -371,6 +372,7 @@ def _parse_profile_specs(raw: str) -> list[dict]:
         florence = parts[1] if len(parts) > 1 and parts[1] else "full"
         ocr_mode = parts[2] if len(parts) > 2 and parts[2] else "tiled"
         ocr_scale = parts[3] if len(parts) > 3 and parts[3] else None
+        backend = parts[4] if len(parts) > 4 and parts[4] else None
         if sam3_profile not in SAM3_PROFILES:
             raise SystemExit(f"unknown --benchmark-profiles sam3 profile: {sam3_profile!r} "
                              f"(choose from {sorted(SAM3_PROFILES)})")
@@ -383,6 +385,7 @@ def _parse_profile_specs(raw: str) -> list[dict]:
             "florence": florence,
             "ocr_mode": ocr_mode,
             "ocr_scale": float(ocr_scale) if ocr_scale is not None else None,
+            "backend": backend,
         })
     return specs
 
@@ -521,9 +524,9 @@ def main():
         elif p.is_file():
             images.append(p)
 
-    def _build_ocr(florence: str, ocr_scale: float) -> Any:
+    def _build_ocr(florence: str, ocr_scale: float, backend_name: str | None = None) -> Any:
         backend = build_ocr_backend(
-            args.ocr_backend,
+            backend_name or args.ocr_backend,
             gpu=args.device,
             gazetteer=gazetteer,
             scale=ocr_scale,
@@ -564,12 +567,15 @@ def main():
             florence = spec["florence"]
             ocr_mode = spec["ocr_mode"]
             ocr_scale = spec["ocr_scale"] if spec["ocr_scale"] is not None else args.ocr_scale
-            key = (florence, ocr_mode, ocr_scale)
+            backend_spec = spec["backend"]
+            key = (backend_spec, florence, ocr_mode, ocr_scale)
             if key != prev_key:
-                ocr_backend = _build_ocr(florence, ocr_scale)
+                ocr_backend = _build_ocr(florence, ocr_scale, backend_name=backend_spec)
                 prev_key = key
             profile = SAM3_PROFILES[sam3_profile]
             label = f"{sam3_profile}/{florence}/{ocr_mode}@{ocr_scale}"
+            if backend_spec and backend_spec != args.ocr_backend:
+                label = f"{label}+{backend_spec}"
             n_prompts = sum(len(profile[key]) for key in
                             ("class_prompts", "signage_prompts", "person_prompts", "poster_prompts", "shelf_prompts"))
             print(f"\n--- profile {label} | {n_prompts} prompts | mode={ocr_mode} scale={ocr_scale} ---")
@@ -584,6 +590,7 @@ def main():
                 "florence_scene": florence,
                 "ocr_mode": ocr_mode,
                 "ocr_scale": ocr_scale,
+                "ocr_backend": backend_spec or args.ocr_backend,
                 "images": len(images),
                 "sam3_prompts": n_prompts,
                 "avg_sam3_seconds": round(run["avg_sam3_seconds"], 3),
