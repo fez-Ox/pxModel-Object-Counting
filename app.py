@@ -178,11 +178,11 @@ else:
             )
             
             # --- KPI Dashboard Metrics ---
-            t = result.get("timings", {})
-            c = result.get("counts", {})
+            t = result.get("timings", {}) or {}
+            c = result.get("counts", {}) or {}
             outputs = result.get("outputs", [])
             signs = result.get("signs", [])
-            
+
             brand_counts = {}
             for out in outputs:
                 b = out.get("brand", "unknown")
@@ -191,10 +191,20 @@ else:
             col1, col2, col3, col4, col5 = st.columns(5)
             col1.metric("Total Time", f"{t.get('total_pipeline_seconds', 0.0):.2f}s")
             col2.metric("SAM3 Time", f"{t.get('sam3_time_seconds', 0.0):.2f}s")
-            col3.metric("Tiled OCR Time", f"{t.get('single_pass_ocr_seconds', 0.0):.2f}s")
+            col3.metric("OCR Time", f"{t.get('single_pass_ocr_seconds', 0.0):.2f}s")
             col4.metric("Frames Found", len(outputs))
             col5.metric("Signs Detected", len(signs))
-            
+
+            st.markdown("---")
+            st.subheader("⏱️ Inference Timing Breakdown")
+            timing_rows = [{"stage": key, "seconds": value} for key, value in t.items()]
+            if timing_rows:
+                import pandas as pd
+                st.dataframe(pd.DataFrame(timing_rows), use_container_width=True)
+            else:
+                st.warning("No timing data captured for this run.")
+            st.markdown("---")
+
             st.markdown(f"**Brand Breakdown**: `{json.dumps(brand_counts)}`")
             st.markdown("---")
             
