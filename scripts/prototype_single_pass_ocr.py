@@ -13,6 +13,7 @@ Profiles and scene modes:
 
 import argparse
 import json
+import subprocess
 import sys
 import time
 from pathlib import Path
@@ -82,6 +83,98 @@ SAM3_PROFILES = {
         "shelf_prompts": (),
     },
 }
+
+
+_PADDLE_CHILD = r"""
+import json, sys
+from paddleocr import PaddleOCR
+ocr = PaddleOCR(lang="en", device=sys.argv[1])
+res = ocr.predict(sys.argv[2])
+out = []
+for r in res:
+    payload = getattr(r, "json", None)
+    if callable(payload):
+        payload = payload()
+    if isinstance(payload, str):
+        payload = json.loads(payload)
+    for poly, txt, score in zip(
+        payload.get("rec_polys", []),
+        payload.get("rec_texts", []),
+        payload.get("rec_scores", []),
+    ):
+        out.append([poly, txt, float(score)])
+json.dump(out, sys.stdout)
+"""
+
+
+class PaddleSubprocessBackend:
+    """PaddleOCR PP-OCRv5 backend isolated in a dedicated subprocess.
+
+    Paddle's PDX runtime refuses re-initialization inside a process that has
+    already imported/initialized paddle (which the Kaggle worker image does),
+    so the whole engine lifecycle - device probe, model load, predict - runs
+    in a fresh child interpreter per image.
+    """
+
+    name = "paddleocr-sub"
+    reliability = 0.95
+
+    def __init__(self, gpu: bool | str = False) -> None:
+        self.gpu = gpu
+        self._device: str | None = None
+
+    def _device_name(self) -> str:
+        if self._device is None:
+            probe = subprocess.run(
+                [sys.executable, "-c",
+                 "import paddle; print(int(paddle.device.is_compiled_with_cuda()))"],
+                capture_output=True, text=True, timeout=300,
+            )
+            has_cuda = probe.stdout.strip().endswith("1")
+            use_gpu = has_cuda and (self.gpu is True or self.gpu == "cuda")
+            self._device = "gpu" if use_gpu else "cpu"
+        return self._device
+
+    def detect(self, image: Image.Image) -> list[TextDetection]:
+        import os
+        import tempfile
+
+        with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as fh:
+            tmp = fh.name
+        try:
+            image.save(tmp, format="PNG")
+            run = subprocess.run(
+                [sys.executable, "-c", _PADDLE_CHILD, self._device_name(), tmp],
+                capture_output=True, text=True, timeout=900,
+            )
+        finally:
+            os.unlink(tmp)
+        if run.returncode != 0 or not run.stdout.strip():
+            return []
+        try:
+            rows = json.loads(run.stdout.strip().splitlines()[-1])
+        except (json.JSONDecodeError, IndexError):
+            return []
+        detections: list[TextDetection] = []
+        for poly, text, score in rows:
+            xs = [p[0] for p in poly]
+            ys = [p[1] for p in poly]
+            if not xs or not ys:
+                continue
+            detections.append(TextDetection(
+                text=str(text).strip(),
+                bbox=[float(min(xs)), float(min(ys)),
+                      float(max(xs) - min(xs)), float(max(ys) - min(ys))],
+                confidence=max(0.0, min(1.0, float(score))),
+                source="paddleocr",
+            ))
+        return detections
+
+    def detect_batch(self, images: list[Image.Image]) -> list[list[TextDetection]]:
+        return [self.detect(image) for image in images]
+
+    def reset_budget(self) -> None:
+        pass
 
 
 def tile_image(image: Image.Image, tile_size: int = 1600, overlap: int = 400) -> list[tuple[Image.Image, int, int]]:
@@ -526,6 +619,8 @@ def main():
 
     def _build_ocr(florence: str, ocr_scale: float, backend_name: str | None = None) -> Any:
         name = backend_name or args.ocr_backend
+        if name == "paddleocr":
+            return PaddleSubprocessBackend(gpu=args.device)
         backend = build_ocr_backend(
             name,
             gpu=args.device,
