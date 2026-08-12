@@ -59,15 +59,30 @@ def load_models(sam3_checkpoint_path: str, device: str, brand_file_path: str):
 st.sidebar.header("⚙️ Pipeline Configuration")
 
 # Image Selection Mode
-image_source = st.sidebar.radio(
-    "Image Source",
-    options=["Select Pre-loaded Sample", "Upload Custom Image"],
-    index=0,
-)
-
 sample_dir = repo_root / "item-count-image-samples"
 sample_images = sorted(list(sample_dir.glob("*.jpg")) + list(sample_dir.glob("*.png")))
+
+# Pre-loaded samples are served from the mounted Kaggle dataset
+# (faizankhan101/eyewear-test-samples) when running on Kaggle GPU.
+kaggle_input_dir = Path("/kaggle/input/eyewear-test-samples")
+if kaggle_input_dir.is_dir():
+    sample_images += sorted(
+        p for p in kaggle_input_dir.rglob("*")
+        if p.suffix.lower() in {".jpg", ".jpeg", ".png", ".webp"}
+    )
+seen: set[str] = set()
+sample_images = [p for p in sample_images if not (str(p) in seen or seen.add(str(p)))]
 sample_dict = {img.name: img for img in sample_images}
+
+if sample_images:
+    image_source = st.sidebar.radio(
+        "Image Source",
+        options=["Select Pre-loaded Sample", "Upload Custom Image"],
+        index=0,
+    )
+else:
+    st.sidebar.warning("No sample images found; using upload-only mode.")
+    image_source = "Upload Custom Image"
 
 selected_image_path = None
 uploaded_image_file = None
