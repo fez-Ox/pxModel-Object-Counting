@@ -56,7 +56,7 @@ SAM3_PROFILES = {
         "shelf_prompts": DEFAULT_SHELF_PROMPTS,
     },
     "fast": {
-        "class_prompts": ("sunglasses", "eyeglasses"),
+        "class_prompts": ("sunglasses", "eyeglasses", "glasses"),
         "signage_prompts": (),
         "person_prompts": ("people",),
         "poster_prompts": ("advertisements",),
@@ -158,6 +158,7 @@ def run_single_pass_prototype(
     poster_prompts: tuple[str, ...] = DEFAULT_POSTER_PROMPTS,
     shelf_prompts: tuple[str, ...] = DEFAULT_SHELF_PROMPTS,
     retry_threshold: float = 0.15,
+    ocr_mode: str = "tiled",
 ) -> dict:
     start_time = time.perf_counter()
     image = Image.open(image_path).convert("RGB")
@@ -218,12 +219,21 @@ def run_single_pass_prototype(
 
     # --- Stage 2: Full-Resolution / Tiled OCR + SAM3 Signage Crop Pass ---
     ocr_start = time.perf_counter()
-    tiles = tile_image(image, tile_size=tile_threshold, overlap=400)
 
-    # Process tiled full-resolution passes in GPU micro-batches
-    tile_detections: list[TextDetection] = process_ocr_batches(
-        tiles, ocr_backend, batch_size=ocr_batch_size
-    )
+    if ocr_mode == "single":
+        # One native-resolution full-frame pass: RapidOCR gains nothing from
+        # tiling (no upscale beyond max_dimension), and a single detect also
+        # gives the SelectiveOCR scene pass the whole image instead of a tile.
+        tiles = [(image, 0, 0)]
+        tile_detections: list[TextDetection] = process_ocr_batches(
+            tiles, ocr_backend, batch_size=1
+        )
+    else:
+        tiles = tile_image(image, tile_size=tile_threshold, overlap=400)
+        # Process tiled full-resolution passes in GPU micro-batches
+        tile_detections = process_ocr_batches(
+            tiles, ocr_backend, batch_size=ocr_batch_size
+        )
     ocr_tiles_time = time.perf_counter() - ocr_start
 
     # Process SAM3 segmented signage placard crops in GPU micro-batches
@@ -320,19 +330,36 @@ def run_single_pass_prototype(
     }
 
 
-def _parse_profile_specs(raw: str) -> list[tuple[str, str]]:
-    specs: list[tuple[str, str]] = []
+def _parse_profile_specs(raw: str) -> list[dict]:
+    """Parse '<sam3>[:<florence>[:<ocr_mode>[:<ocr_scale>]]]' tokens.
+
+    ':'-separated fields with defaults for the omitted parts, e.g.
+    'fast:quick:single:1.0', 'fast:off', or 'full/full' (legacy '/' form).
+    """
+    specs: list[dict] = []
     for token in raw.split(","):
         token = token.strip()
         if not token:
             continue
-        parts = [part.strip() for part in token.split("/")]
+        token = token.replace("/", ":")
+        parts = [part.strip() for part in token.split(":")]
         sam3_profile = parts[0] or "full"
-        florence = parts[1] if len(parts) > 1 else "full"
+        florence = parts[1] if len(parts) > 1 and parts[1] else "full"
+        ocr_mode = parts[2] if len(parts) > 2 and parts[2] else "tiled"
+        ocr_scale = parts[3] if len(parts) > 3 and parts[3] else None
         if sam3_profile not in SAM3_PROFILES:
             raise SystemExit(f"unknown --benchmark-profiles sam3 profile: {sam3_profile!r} "
                              f"(choose from {sorted(SAM3_PROFILES)})")
-        specs.append((sam3_profile, florence))
+        if ocr_mode not in ("tiled", "single"):
+            raise SystemExit(f"unknown ocr_mode in profile spec: {ocr_mode!r}")
+        if florence not in ("full", "quick", "off"):
+            raise SystemExit(f"unknown florence scene in profile spec: {florence!r}")
+        specs.append({
+            "sam3_profile": sam3_profile,
+            "florence": florence,
+            "ocr_mode": ocr_mode,
+            "ocr_scale": float(ocr_scale) if ocr_scale is not None else None,
+        })
     return specs
 
 
@@ -348,6 +375,7 @@ def run_images(
     vis_dir: Path,
     save_outputs: bool,
     out_tag: str | None = None,
+    ocr_mode: str = "tiled",
 ) -> dict:
     results: dict = {}
     total_sam3 = 0.0
@@ -359,6 +387,10 @@ def run_images(
         json_dir.mkdir(parents=True, exist_ok=True)
         vis_dir.mkdir(parents=True, exist_ok=True)
     for img_path in images:
+        # Fresh fallback budget per image so the bounded Florence scene pass
+        # runs once per image (matching pipeline.py), not only on the first.
+        if hasattr(ocr_backend, "reset_budget"):
+            ocr_backend.reset_budget()
         res = run_single_pass_prototype(
             img_path,
             localizer,
@@ -371,6 +403,7 @@ def run_images(
             person_prompts=profile["person_prompts"],
             poster_prompts=profile["poster_prompts"],
             shelf_prompts=profile["shelf_prompts"],
+            ocr_mode=ocr_mode,
         )
         results[img_path.stem] = res
 
@@ -418,17 +451,19 @@ def main():
     parser.add_argument("--brand-file", required=True, help="Gazetteer brand file")
     parser.add_argument("--ocr-backend", default="rapidocr+florence2")
     parser.add_argument("--ocr-batch-size", type=int, default=4, help="Micro-batch size for GPU OCR sub-tile/placard inference (default: 4)")
-    parser.add_argument("--ocr-scale", type=float, default=2.0, help="Upscale factor before OCR (lower = faster; default: 2.0)")
+    parser.add_argument("--ocr-scale", type=float, default=1.0, help="Upscale factor before OCR (lower = faster; default: 1.0)")
+    parser.add_argument("--ocr-mode", choices=["tiled", "single"], default="tiled",
+                        help="tiled: overlapping 2500px tiles; single: one full-frame pass (default: tiled)")
     parser.add_argument("--florence-scene", choices=["full", "quick", "off"], default="full",
                         help="full: full-frame + lower + column passes; quick: single full pass; off: no Florence scene pass")
     parser.add_argument("--sam3-profile", choices=list(SAM3_PROFILES), default="full",
-                        help="full: 4 class + 4 signage + 9 scene prompts; fast: 2 class + 0 signage + 3 scene prompts")
+                        help="full: 4 class + 4 signage + 9 scene prompts; fast: 3 class + 0 signage + 3 scene prompts")
     parser.add_argument("--sam3-prompt-batch-size", type=int, default=4,
                         help="Batch SAM3 prompts through set_text_prompts (default: 4)")
     parser.add_argument("--benchmark-batch-sizes", type=str, default=None, help="Comma-separated batch sizes to benchmark (e.g. '1,2,4,8')")
     parser.add_argument("--max-benchmark-images", type=int, default=None, help="Limit number of images used for batch size benchmarking (e.g. 3)")
     parser.add_argument("--benchmark-profiles", type=str, default=None,
-                        help="Comma-separated '<sam3>/<florence>' specs to benchmark, e.g. 'full/full,fast/quick,fast/off'")
+                        help="Comma-separated '<sam3>:<florence>:<mode>:<scale>' specs, e.g. 'fast:quick:single:1.0,fast:off:single:1.0'")
     parser.add_argument("--device", default="cuda")
     parser.add_argument("--out", default="output/prototype_results")
     args = parser.parse_args()
@@ -459,12 +494,12 @@ def main():
         elif p.is_file():
             images.append(p)
 
-    def _build_ocr(florence: str) -> Any:
+    def _build_ocr(florence: str, ocr_scale: float) -> Any:
         backend = build_ocr_backend(
             args.ocr_backend,
             gpu=args.device,
             gazetteer=gazetteer,
-            scale=args.ocr_scale,
+            scale=ocr_scale,
             florence_scene=florence,
         )
         if hasattr(backend, "max_fallback_calls"):
@@ -476,24 +511,31 @@ def main():
         print(f"\n=== PROFILE BENCHMARK ({len(images)} images | {len(specs)} specs) ===")
         report: dict[str, dict] = {}
         ocr_backend = None
-        prev_florence = None
-        for sam3_profile, florence in specs:
-            if florence != prev_florence:
-                ocr_backend = _build_ocr(florence)
-                prev_florence = florence
+        prev_key = None
+        for spec in specs:
+            sam3_profile = spec["sam3_profile"]
+            florence = spec["florence"]
+            ocr_mode = spec["ocr_mode"]
+            ocr_scale = spec["ocr_scale"] if spec["ocr_scale"] is not None else args.ocr_scale
+            key = (florence, ocr_mode, ocr_scale)
+            if key != prev_key:
+                ocr_backend = _build_ocr(florence, ocr_scale)
+                prev_key = key
             profile = SAM3_PROFILES[sam3_profile]
-            label = f"{sam3_profile}/{florence}"
+            label = f"{sam3_profile}/{florence}/{ocr_mode}@{ocr_scale}"
             n_prompts = sum(len(profile[key]) for key in
                             ("class_prompts", "signage_prompts", "person_prompts", "poster_prompts", "shelf_prompts"))
-            print(f"\n--- profile {label} | {n_prompts} prompts ---")
+            print(f"\n--- profile {label} | {n_prompts} prompts | mode={ocr_mode} scale={ocr_scale} ---")
             run = run_images(
                 images, localizer, ocr_backend, gazetteer, config, profile,
                 args.ocr_batch_size, json_dir, vis_dir, save_outputs=True,
-                out_tag=label.replace("/", "__"),
+                out_tag=label.replace("/", "__").replace("@", "x"), ocr_mode=ocr_mode,
             )
             report[label] = {
                 "sam3_profile": sam3_profile,
                 "florence_scene": florence,
+                "ocr_mode": ocr_mode,
+                "ocr_scale": ocr_scale,
                 "images": len(images),
                 "sam3_prompts": n_prompts,
                 "avg_sam3_seconds": round(run["avg_sam3_seconds"], 3),
@@ -533,7 +575,7 @@ def main():
         benchmark_images = images
 
     profile = SAM3_PROFILES[args.sam3_profile]
-    ocr_backend = _build_ocr(args.florence_scene)
+    ocr_backend = _build_ocr(args.florence_scene, args.ocr_scale)
     benchmark_report = {}
 
     for bs in batch_sizes_to_test:
@@ -543,6 +585,7 @@ def main():
         run = run_images(
             current_images, localizer, ocr_backend, gazetteer, config, profile,
             bs, json_dir, vis_dir, save_outputs=True,
+            ocr_mode=args.ocr_mode,
         )
         benchmark_report[bs] = {
             "batch_size": bs,
