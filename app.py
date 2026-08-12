@@ -156,7 +156,8 @@ else:
             
             config = LocalizationConfig(
                 gazetteer=brands,
-                confidence_threshold=c1_thresh,
+                cascade_t1=c1_thresh,
+                cascade_t2=c2_thresh,
                 enable_highest_confidence_fallback=enable_highest_confidence_fallback,
             )
             
