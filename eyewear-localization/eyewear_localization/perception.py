@@ -708,6 +708,13 @@ def build_ocr_backend(
         try:
             return PaddleOCRBackend(scale=scale, device="cuda" if gpu is True or gpu == "cuda" else "cpu")
         except Exception as exc:
+            # The Kaggle worker installs the CPU wheel (paddlepaddle 3.2.2
+            # from PyPI); retry on CPU before giving up on the backend.
+            if gpu is True or gpu == "cuda":
+                try:
+                    return PaddleOCRBackend(scale=scale, device="cpu")
+                except Exception as exc2:
+                    return NullOCRBackend(f"PaddleOCR unavailable: {exc2}")
             return NullOCRBackend(f"PaddleOCR unavailable: {exc}")
     if name in {"florence2", "florence2-large", "florence2-base"}:
         try:

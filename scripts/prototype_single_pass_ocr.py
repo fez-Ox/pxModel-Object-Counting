@@ -525,8 +525,9 @@ def main():
             images.append(p)
 
     def _build_ocr(florence: str, ocr_scale: float, backend_name: str | None = None) -> Any:
+        name = backend_name or args.ocr_backend
         backend = build_ocr_backend(
-            backend_name or args.ocr_backend,
+            name,
             gpu=args.device,
             gazetteer=gazetteer,
             scale=ocr_scale,
@@ -534,6 +535,11 @@ def main():
         )
         if hasattr(backend, "max_fallback_calls"):
             backend.max_fallback_calls = 99
+        if getattr(backend, "name", "") == "null":
+            reason = str(getattr(backend, "reason", "unavailable"))
+            print(f"  WARNING: OCR backend {name!r} unavailable: {reason}")
+            diag = base_out_dir / "backend_diagnostics.json"
+            diag.write_text(json.dumps({name: reason}, indent=2))
         return backend
 
     def _build_crop_ocr_backend() -> Any:
