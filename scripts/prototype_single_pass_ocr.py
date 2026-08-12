@@ -62,6 +62,25 @@ SAM3_PROFILES = {
         "poster_prompts": ("advertisements",),
         "shelf_prompts": ("retail shelves",),
     },
+    # Signage-assisted fast profiles: re-enable the SAM3 signage placeholder
+    # pass so display text (countertop base plates, tray labels) is OCR'd on
+    # upscaled crops instead of only the full frame.
+    "fasts": {
+        "class_prompts": ("sunglasses", "eyeglasses", "glasses"),
+        "signage_prompts": SAM3_SIGNAGE_PROMPTS,
+        "person_prompts": ("people",),
+        "poster_prompts": ("advertisements",),
+        "shelf_prompts": ("retail shelves",),
+    },
+    # fasts without the scene filter (scene prompts removed nothing on the GT
+    # set; keeps SAM3 ~1.4s cheaper when the budget is tight).
+    "fastn": {
+        "class_prompts": ("sunglasses", "eyeglasses", "glasses"),
+        "signage_prompts": SAM3_SIGNAGE_PROMPTS,
+        "person_prompts": (),
+        "poster_prompts": (),
+        "shelf_prompts": (),
+    },
 }
 
 
@@ -159,6 +178,7 @@ def run_single_pass_prototype(
     shelf_prompts: tuple[str, ...] = DEFAULT_SHELF_PROMPTS,
     retry_threshold: float = 0.15,
     ocr_mode: str = "tiled",
+    crop_ocr_backend: Any = None,
 ) -> dict:
     start_time = time.perf_counter()
     image = Image.open(image_path).convert("RGB")
@@ -236,11 +256,15 @@ def run_single_pass_prototype(
         )
     ocr_tiles_time = time.perf_counter() - ocr_start
 
-    # Process SAM3 segmented signage placard crops in GPU micro-batches
+    # Process SAM3 segmented signage placard crops in GPU micro-batches.
+    # Signage crops are OCR'd at 2x (crop_ocr_backend) so small display text
+    # like countertop base-plate logos is legible; the upscale stays under the
+    # RapidOCR max_dimension cap for crop-sized images.
     all_text_detections: list[TextDetection] = list(tile_detections)
     if signage_crops:
+        crop_backend = crop_ocr_backend if crop_ocr_backend is not None else ocr_backend
         placard_detections = process_ocr_batches(
-            signage_crops, ocr_backend, batch_size=ocr_batch_size
+            signage_crops, crop_backend, batch_size=ocr_batch_size
         )
         all_text_detections.extend(placard_detections)
     ocr_signage_time = time.perf_counter() - ocr_start - ocr_tiles_time
@@ -376,6 +400,7 @@ def run_images(
     save_outputs: bool,
     out_tag: str | None = None,
     ocr_mode: str = "tiled",
+    crop_ocr_backend: Any = None,
 ) -> dict:
     results: dict = {}
     total_sam3 = 0.0
@@ -404,6 +429,7 @@ def run_images(
             poster_prompts=profile["poster_prompts"],
             shelf_prompts=profile["shelf_prompts"],
             ocr_mode=ocr_mode,
+            crop_ocr_backend=crop_ocr_backend,
         )
         results[img_path.stem] = res
 
@@ -457,7 +483,8 @@ def main():
     parser.add_argument("--florence-scene", choices=["full", "quick", "off"], default="full",
                         help="full: full-frame + lower + column passes; quick: single full pass; off: no Florence scene pass")
     parser.add_argument("--sam3-profile", choices=list(SAM3_PROFILES), default="full",
-                        help="full: 4 class + 4 signage + 9 scene prompts; fast: 3 class + 0 signage + 3 scene prompts")
+                        help="full: 4 class + 4 signage + 9 scene; fast: 3 class + 0 signage + 3 scene; "
+                             "fasts: fast + signage pass; fastn: fasts without scene filter")
     parser.add_argument("--sam3-prompt-batch-size", type=int, default=4,
                         help="Batch SAM3 prompts through set_text_prompts (default: 4)")
     parser.add_argument("--benchmark-batch-sizes", type=str, default=None, help="Comma-separated batch sizes to benchmark (e.g. '1,2,4,8')")
@@ -506,12 +533,32 @@ def main():
             backend.max_fallback_calls = 99
         return backend
 
+    def _build_crop_ocr_backend() -> Any:
+        """OCR backend for SAM3 signage-detect crops.
+
+        RapidOCR at 2x upscale: crop-sized inputs stay under the max_dimension
+        cap so display text gets a true 2x resolution boost with no VLM cost.
+        """
+        backend = globals().get("_crop_ocr_backend_cache")
+        if backend is not None:
+            return backend
+        try:
+            from eyewear_localization.perception import RapidOCRBackend
+
+            backend = RapidOCRBackend(scale=2.0)
+        except Exception:
+            backend = None
+        globals()["_crop_ocr_backend_cache"] = backend
+        return backend
+
+
     if args.benchmark_profiles:
         specs = _parse_profile_specs(args.benchmark_profiles)
         print(f"\n=== PROFILE BENCHMARK ({len(images)} images | {len(specs)} specs) ===")
         report: dict[str, dict] = {}
         ocr_backend = None
         prev_key = None
+        crop_ocr_backend = _build_crop_ocr_backend()
         for spec in specs:
             sam3_profile = spec["sam3_profile"]
             florence = spec["florence"]
@@ -530,6 +577,7 @@ def main():
                 images, localizer, ocr_backend, gazetteer, config, profile,
                 args.ocr_batch_size, json_dir, vis_dir, save_outputs=True,
                 out_tag=label.replace("/", "__").replace("@", "x"), ocr_mode=ocr_mode,
+                crop_ocr_backend=crop_ocr_backend,
             )
             report[label] = {
                 "sam3_profile": sam3_profile,
@@ -576,6 +624,7 @@ def main():
 
     profile = SAM3_PROFILES[args.sam3_profile]
     ocr_backend = _build_ocr(args.florence_scene, args.ocr_scale)
+    crop_ocr_backend = _build_crop_ocr_backend()
     benchmark_report = {}
 
     for bs in batch_sizes_to_test:
@@ -586,6 +635,7 @@ def main():
             current_images, localizer, ocr_backend, gazetteer, config, profile,
             bs, json_dir, vis_dir, save_outputs=True,
             ocr_mode=args.ocr_mode,
+            crop_ocr_backend=crop_ocr_backend,
         )
         benchmark_report[bs] = {
             "batch_size": bs,
